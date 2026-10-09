@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  临时构建用 settings（不改动用户全局 ~/.m2 与 maven conf 配置）。
+  原因：本地仓库里的 sqlite-jdbc 等依赖，_remote.repositories 记录的来源仓库 id 是
+  aliyun-public；而全局 settings 配置的是已下线的内网 Nexus(192.168.31.106:9903)，
+  Maven 因此不认为本地缓存有效、坚持去远程解析，导致在线/离线都构建失败。
+  这里把镜像 id 设为 aliyun-public 并指向阿里云公共仓，本地缓存即可被正常复用。
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <localRepository>D:/app/software_delop/maven/maven-repo</localRepository>
+  <mirrors>
+    <mirror>
+      <id>aliyun-public</id>
+      <mirrorOf>*</mirrorOf>
+      <name>aliyun public</name>
+      <url>https://maven.aliyun.com/repository/public</url>
+    </mirror>
+  </mirrors>
+</settings>

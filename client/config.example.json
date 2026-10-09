@@ -1,0 +1,27 @@
+{
+  "server": "http://192.168.1.10:18080",
+  "srcIp": "",
+  "batchSize": 100,
+  "flushIntervalMs": 1000,
+  "retry": 3,
+  "queueMax": 20000,
+  "stateFile": "./xtlog-client.state",
+  "collectors": [
+    {
+      "name": "订单服务",
+      "token": "换成 xtlog 应用管理页里的接入 Token",
+      "appId": 12,
+      "type": "file",
+      "paths": ["/var/log/order/app.log", "/var/log/order/error.log"],
+      "encoding": "utf8",
+      "fromStart": false
+    },
+    {
+      "name": "游戏服务",
+      "token": "换成另一个应用的接入 Token",
+      "appId": 13,
+      "type": "cmd",
+      "command": "journalctl -u game.service -f -o short-iso"
+    }
+  ]
+}

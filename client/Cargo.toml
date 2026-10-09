@@ -1,0 +1,23 @@
+[package]
+name = "xtlog-client"
+version = "0.1.0"
+edition = "2021"
+description = "xtlog 客户端采集推送器：按配置文件采集本机文件/命令日志并推送到 xtlog-server"
+
+[[bin]]
+name = "xtlog-client"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+encoding_rs = "0.8"
+ctrlc = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

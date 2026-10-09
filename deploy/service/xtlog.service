@@ -1,0 +1,73 @@
+[Unit]
+Description=xtlog-server (unified log collection and viewing service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ==========================================================================
+#  安装步骤（假设解压到 /opt/xtlog-server）：
+#    1. 修改下面 JAVA_HOME 为实际 JDK 路径
+#    2. sudo cp /opt/xtlog-server/service/xtlog.service /etc/systemd/system/
+#    3. sudo systemctl daemon-reload
+#    4. sudo systemctl enable --now xtlog        # 开机自启并立即启动
+#    5. sudo journalctl -u xtlog -f              # 看日志
+#    6. sudo systemctl stop xtlog                # 停止（走优雅停机）
+#
+#  运行用户：默认用 xtlog 专用用户。若还没建，先执行：
+#    sudo useradd -r -s /sbin/nologin xtlog
+#    sudo chown -R xtlog:xtlog /opt/xtlog-server
+#  不想建用户就把下面 User/Group 两行注释掉（会以 root 运行）。
+# ==========================================================================
+
+User=xtlog
+Group=xtlog
+
+Type=simple
+WorkingDirectory=/opt/xtlog-server
+
+# ---------- 按需修改 ----------
+# JDK 安装路径（通常改这一行就够了；下面 ExecStart 会引用它）
+# 不确定装在哪？readlink -f $(which java)  # 去掉结尾的 /bin/java 就是 JAVA_HOME
+Environment="JAVA_HOME=/usr/local/jdk-17"
+# 数据目录：SQLite 库文件、数据源配置、PID 文件都在这里
+Environment="XTLOG_DATA_DIR=/opt/xtlog-server/data"
+# 本机 IP（文件/命令采集给日志打的 src_ip）：默认自动选最优网卡。
+# 若机器上有 WSL/Docker/虚拟网卡导致自动选错（比如选中 172.27.0.1），
+# 取消下面这行注释并改成真实局域网 IP 即可。
+# Environment="XTLOG_HOST_IP=192.168.1.10"
+
+# ---------- 启动命令 ----------
+# 注意：JVM 内存参数直接写在这里（-Xms256m -Xmx1g，按机器内存调）。
+# 不要改用 Environment="JAVA_OPTS=-Xms256m -Xmx1g" 再 ${JAVA_OPTS} 引用 ——
+# systemd 展开环境变量后不会按空格拆词，多个参数会被当成一整个参数传给 java，
+# 直接报 "Unrecognized option"。单值的 JAVA_HOME / XTLOG_DATA_DIR 没有这个问题。
+#
+# 另一个关键点：classpath 里 config 必须排在 jar 前面，
+# 外置的 application.properties（端口等）才会覆盖 jar 内置的那份。
+# drivers/* 由 JVM 展开，放入 MySQL / PostgreSQL 驱动 jar 即可生效。
+ExecStart=${JAVA_HOME}/bin/java -Xms256m -Xmx1g \
+  -Dfile.encoding=UTF-8 \
+  -Dsun.stdout.encoding=UTF-8 \
+  -Dsun.stderr.encoding=UTF-8 \
+  -Dxtlog.data.dir=${XTLOG_DATA_DIR} \
+  -cp /opt/xtlog-server/config:/opt/xtlog-server/xtlog-server.jar:/opt/xtlog-server/drivers/* \
+  top.xtcoder.xtlog.XtLogApplication
+
+# 优雅停机：xtboot 注册了 shutdown hook，会先停止收新请求再关数据源
+ExecStop=/bin/kill -TERM $MAINPID
+KillSignal=SIGTERM
+TimeoutStopSec=20
+SuccessExitStatus=143
+
+Restart=on-failure
+RestartSec=5
+
+# 日志默认进 journald（journalctl -u xtlog -f）。
+# 想落文件就改成下面两行（目录需对 User 可写）：
+# StandardOutput=append:/opt/xtlog-server/logs/console.log
+# StandardError=append:/opt/xtlog-server/logs/console.log
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

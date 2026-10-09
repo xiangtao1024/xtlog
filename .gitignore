@@ -1,0 +1,24 @@
+# ---- 构建产物 ----
+target/
+
+# ---- 客户端（Rust 子项目）----
+client/target/
+
+# ---- 前端 ----
+web/node_modules/
+web/dist/
+
+# ---- 部署包产出（scripts\build-dist.* 生成）----
+dist/
+
+# ---- 运行期数据（SQLite 库、WAL 日志）----
+data/
+
+# ---- 诊断 / 临时文件 ----
+# 注意：沙箱的 safe-delete 钩子会拦截删除，这些临时产物只能靠忽略来保持仓库干净
+_*.log
+_*.txt
+_*.json
+_*.java
+pic-*.png
+fix-*.png
