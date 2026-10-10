@@ -3,6 +3,9 @@ target/
 
 # ---- 客户端（Rust 子项目）----
 client/target/
+# 客户端状态文件（相对路径运行时落在 cwd，避免污染仓库）
+xtlog-client.state
+*.state
 
 # ---- 前端 ----
 web/node_modules/

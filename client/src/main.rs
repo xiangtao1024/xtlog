@@ -117,6 +117,15 @@ fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let registry = source::ProcRegistry::new();
     let offsets = source::OffsetStore::new(cfg.state_file.clone());
+    match offsets.path_display() {
+        Some(p) => println!(
+            "[xtlog-client] 状态文件：{}（记录文件采集偏移，仅 file 采集器使用）",
+            p
+        ),
+        None => println!(
+            "[xtlog-client] 状态文件：未配置 —— 进程重启后从日志文件末尾重新开始，停机期间写入的日志会丢"
+        ),
+    }
 
     // 优雅退出：Ctrl+C / SIGTERM 时停采集、杀掉拉起的命令进程、把剩余日志推完再退出
     let s_stop = stop.clone();

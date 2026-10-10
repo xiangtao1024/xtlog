@@ -39,11 +39,32 @@ impl OffsetStore {
                 .unwrap_or_default(),
             None => HashMap::new(),
         };
-        Arc::new(OffsetStore {
+        let store = Arc::new(OffsetStore {
             map: Mutex::new(map),
             path: p,
             dirty: AtomicBool::new(false),
-        })
+        });
+        // 配了 stateFile 但文件还不存在时，立刻落一份初始快照。
+        // 目的：启动后用户能马上看到这个文件（也便于核对相对路径到底落在哪），
+        //      而不是等到「读到新日志 + 3 秒落盘周期」才出现。
+        if let Some(pp) = &store.path {
+            if !pp.exists() {
+                store.dirty.store(true, Ordering::Relaxed);
+                store.flush();
+            }
+        }
+        store
+    }
+
+    /// 状态文件的可读路径（相对路径补成绝对路径，方便用户找到它）
+    pub fn path_display(&self) -> Option<String> {
+        let p = self.path.as_ref()?;
+        let abs = if p.is_absolute() {
+            p.clone()
+        } else {
+            std::env::current_dir().ok()?.join(p)
+        };
+        Some(abs.to_string_lossy().replace("\\\\?\\", ""))
     }
 
     pub fn get(&self, key: &str) -> Option<u64> {
@@ -130,6 +151,9 @@ impl FileFollower {
                 // 默认只推启动之后新增的日志，避免把历史文件整份重放一遍
                 self.offset = size;
             }
+            // 把「起始偏移」也记进状态文件：即使暂时没有新日志，
+            // 也能在文件里看到每个被采集文件读到哪了（重启后从这个位置继续）
+            self.offsets.set(&self.path_str, self.offset);
         }
         if size < self.offset {
             // 文件被截断或日志轮转（如 app.log -> app.log.1）后重新生成

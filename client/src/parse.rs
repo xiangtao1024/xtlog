@@ -213,7 +213,13 @@ fn guess_thread(first: &str) -> String {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() > max {
-        s[..max].to_string()
+        // 不能从多字节字符（中文/emoji 等 UTF-8）中间切，否则 panic；
+        // 向后退到最近的字符边界，尽量贴近字节预算又不拆字符
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].to_string()
     } else {
         s.to_string()
     }

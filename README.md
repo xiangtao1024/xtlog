@@ -182,7 +182,7 @@ curl -X POST http://localhost:18080/api/logs \
 }
 ```
 
-`collectors` 是数组，每项对应 xtlog 里的一个应用。客户端本地解析级别/时间/logger/线程后再上报，界面显示与服务端自采一致；`stateFile` 记录读取偏移，重启不重复不丢日志。
+`collectors` 是数组，每项对应 xtlog 里的一个应用。客户端本地解析级别/时间/logger/线程后再上报，界面显示与服务端自采一致；`stateFile` 记录**文件采集**的读取偏移（仅 `file` 采集器使用），重启不重复也不丢日志，相对路径按启动时的工作目录解析。
 
 > 完整字段说明见 **[client/README.md](client/README.md)**；远程采集的三种方案选型见 [deploy/README.md §5.2](deploy/README.md)。
 

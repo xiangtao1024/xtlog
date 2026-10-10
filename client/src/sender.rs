@@ -216,7 +216,12 @@ fn build_payload(c: &Collector, batch: &[Entry], src_ip: &str) -> String {
 
 fn first_n(s: &str, n: usize) -> String {
     if s.len() > n {
-        format!("{}...", &s[..n])
+        // 与 parse.rs::truncate 同样的字符边界保护，避免中文/emoji 截断 panic
+        let mut end = n;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     } else {
         s.to_string()
     }
