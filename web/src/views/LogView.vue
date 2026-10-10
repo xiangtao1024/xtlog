@@ -280,11 +280,36 @@ function rowClass({ row }) {
 
 /* ---------------- SSE 实时订阅 ---------------- */
 let es = null
+let pending = [] // SSE 缓冲：避免逐条触发整列表重渲染风暴
+let flushTimer = null
+let paused = false // 标签页隐藏时暂停 flush，节省后台 CPU
 
 function stopStream() {
   if (es) {
     es.close()
     es = null
+  }
+}
+
+function scheduleFlush() {
+  if (flushTimer || paused) return
+  flushTimer = setTimeout(flush, 200)
+}
+
+/** 每 ~200ms 把缓冲的日志成批送进视图：无论日志多快，DOM 更新 ≤5 次/秒 */
+function flush() {
+  flushTimer = null
+  if (paused || !pending.length) return
+  const batch = pending
+  pending = []
+  // 两个控制台各推一份：实时视图尾随，全量视图贴在底部时才跟随
+  liveConsoleRef.value?.pushMany(batch)
+  allConsoleRef.value?.pushMany(batch)
+  // 表格只在首页把实时数据插到顶部（保持分页语义）
+  if (page.value === 1) {
+    const pre = batch.slice().reverse() // 最新在前
+    rows.value = pre.concat(rows.value)
+    if (rows.value.length > pageSize.value) rows.value.length = pageSize.value
   }
 }
 
@@ -302,18 +327,19 @@ function startStream() {
     raw._key = keyOf()
     raw._live = true
     liveCount.value++
-    // 两个控制台都推一份：实时视图尾随，全量视图贴在底部时才跟随
-    liveConsoleRef.value?.push(raw)
-    allConsoleRef.value?.push(raw)
-    // 只在第一页把实时数据插到顶部，其他页插进去会打乱分页语义
-    if (page.value === 1) {
-      rows.value.unshift(raw)
-      if (rows.value.length > pageSize.value) rows.value.pop()
-    }
+    pending.push(raw)
+    // 极端后台积压时丢弃最旧，防止内存无限增长
+    if (pending.length > 5000) pending.shift()
+    scheduleFlush()
   }
   es.onerror = () => {
     /* EventSource 会自动重连 */
   }
+}
+
+function onVisibility() {
+  paused = document.hidden
+  if (!paused) scheduleFlush()
 }
 
 function matches(r) {
@@ -324,6 +350,7 @@ function matches(r) {
 }
 
 onMounted(async () => {
+  document.addEventListener('visibilitychange', onVisibility)
   if (!apps.value.length) {
     try {
       await loadMeta()
@@ -344,6 +371,9 @@ watch(streamUrl, () => {
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onVisibility)
+  if (flushTimer) clearTimeout(flushTimer)
+  flushTimer = null
   stopStream()
 })
 </script>

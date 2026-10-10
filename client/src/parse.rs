@@ -8,7 +8,7 @@
  *  3. 推断级别 / logger / 线程名。
  */
 
-use chrono::{Local, TimeZone};
+use chrono::{Datelike, Local, TimeZone};
 
 const LEVEL_WORDS: [&str; 11] = [
     "TRACE", "DEBUG", "INFO", "NOTICE", "WARN", "WARNING", "ERROR", "ERR", "FATAL", "CRITICAL",
@@ -90,12 +90,12 @@ impl Merger {
     }
 }
 
-/// 是否为一条新日志的起始行：行首有时间戳，或首词就是级别词
+/// 是否为一条新日志的起始行：行内/行首有时间戳，或首词就是级别词
 pub fn is_new_entry(line: &str) -> bool {
     if line.is_empty() {
         return false;
     }
-    if parse_ts_fields(line).is_some() {
+    if has_timestamp(line) {
         return true;
     }
     let head = match line.find(' ') {
@@ -169,10 +169,8 @@ fn guess_level(first: &str) -> String {
 
 /// 跳过行首时间戳与级别词，优先取形如 com.demo.Foo 的类名，否则取第一个有效 token
 fn guess_logger(first: &str) -> String {
-    let rest = match parse_ts_fields(first) {
-        Some((_y, _mo, _d, _h, _mi, _s, _ms, end)) => first[end..].trim(),
-        None => first,
-    };
+    let end = ts_end(first);
+    let rest = if end > 0 { &first[end..] } else { first }.trim();
     let mut fallback: Option<&str> = None;
     for p in rest.split_whitespace() {
         if p.is_empty() {
@@ -193,10 +191,8 @@ fn guess_logger(first: &str) -> String {
 
 /// 额外补的：取形如 [http-nio-8080-exec-1] / (main) 这样的线程名（服务端 FILE/CMD 采集不解析线程）
 fn guess_thread(first: &str) -> String {
-    let rest = match parse_ts_fields(first) {
-        Some((_y, _mo, _d, _h, _mi, _s, _ms, end)) => first[end..].trim(),
-        None => first,
-    };
+    let end = ts_end(first);
+    let rest = if end > 0 { &first[end..] } else { first }.trim();
     for p in rest.split_whitespace().take(8) {
         let b = p.as_bytes();
         if b.len() >= 2
@@ -288,9 +284,43 @@ fn digits(b: &[u8], i: usize, n: usize) -> Option<u32> {
     Some(v)
 }
 
-/// 行首时间戳 -> 毫秒时间戳（按本机时区解释，与服务端 SimpleDateFormat 的语义一致）
-fn parse_log_time_ms(first: &str) -> Option<i64> {
-    let (y, mo, d, h, mi, s, ms, _end) = parse_ts_fields(first)?;
+/// 检测各类时间戳，返回匹配结束位置（用于跳过时间戳做 logger/线程推断）。
+/// 顺序：Java/ISO8601（行首）→ nginx error（行首）→ nginx access（行内）→ syslog（行首）。
+pub fn ts_end(first: &str) -> usize {
+    if let Some((_, _, _, _, _, _, _, e)) = parse_ts_fields(first) {
+        return e;
+    }
+    if let Some((_, _, _, _, _, _, _, e)) = nginx_err_ts(first) {
+        return e;
+    }
+    if let Some((_, _, _, _, _, _, _, e)) = nginx_acc_ts(first) {
+        return e;
+    }
+    if let Some((_, _, _, _, _, _, _, e)) = syslog_ts(first) {
+        return e;
+    }
+    0
+}
+
+/// 行内是否含有可识别的时间戳（nginx access 允许时间戳在行内，其余要求从行首开始）
+pub fn has_timestamp(line: &str) -> bool {
+    if nginx_acc_ts(line).is_some() {
+        return true;
+    }
+    if parse_ts_fields(line).is_some() {
+        return true;
+    }
+    if nginx_err_ts(line).is_some() {
+        return true;
+    }
+    if syslog_ts(line).is_some() {
+        return true;
+    }
+    false
+}
+
+/// 把分解出的年月日时分秒毫秒转成毫秒时间戳（按本机时区解释，与服务端语义一致）
+fn to_epoch(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32, ms: u32) -> Option<i64> {
     let date = chrono::NaiveDate::from_ymd_opt(y, mo, d)?;
     let dt = date.and_hms_milli_opt(h, mi, s, ms)?;
     let local = Local
@@ -298,4 +328,231 @@ fn parse_log_time_ms(first: &str) -> Option<i64> {
         .single()
         .or_else(|| Local.from_local_datetime(&dt).earliest())?;
     Some(local.timestamp_millis())
+}
+
+/// nginx error 时间戳：2026/10/10 09:15:32（行首）
+fn nginx_err_ts(line: &str) -> Option<(i32, u32, u32, u32, u32, u32, u32, usize)> {
+    let b = line.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    let y = digits(b, 0, 4)? as i32;
+    if b[4] != b'/' {
+        return None;
+    }
+    let mo = digits(b, 5, 2)?;
+    if b[7] != b'/' {
+        return None;
+    }
+    let d = digits(b, 8, 2)?;
+    if b[10] != b' ' {
+        return None;
+    }
+    let h = digits(b, 11, 2)?;
+    if b[13] != b':' {
+        return None;
+    }
+    let mi = digits(b, 14, 2)?;
+    if b[16] != b':' {
+        return None;
+    }
+    let s = digits(b, 17, 2)?;
+    Some((y, mo, d, h, mi, s, 0, 19))
+}
+
+/// nginx access 时间戳：[10/Oct/2026:09:15:32 +0000]（时间戳在行内，允许任意位置）
+fn nginx_acc_ts(line: &str) -> Option<(i32, u32, u32, u32, u32, u32, u32, usize)> {
+    let b = line.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'[' {
+            let s = i + 1;
+            if s + 2 > b.len() || !b[s].is_ascii_digit() || !b[s + 1].is_ascii_digit() {
+                i += 1;
+                continue;
+            }
+            let d = digits(b, s, 2)?;
+            if s + 2 >= b.len() || b[s + 2] != b'/' {
+                i += 1;
+                continue;
+            }
+            let ms = s + 3;
+            if ms + 3 > b.len() {
+                i += 1;
+                continue;
+            }
+            let mo = month_num(&b[ms..ms + 3])?;
+            if b[ms + 3] != b'/' {
+                i += 1;
+                continue;
+            }
+            let ys = ms + 4;
+            if ys + 4 > b.len() {
+                i += 1;
+                continue;
+            }
+            let y = digits(b, ys, 4)? as i32;
+            if b[ys + 4] != b':' {
+                i += 1;
+                continue;
+            }
+            let hs = ys + 5;
+            let h = digits(b, hs, 2)?;
+            if hs + 2 >= b.len() || b[hs + 2] != b':' {
+                i += 1;
+                continue;
+            }
+            let mis = hs + 3;
+            let mi = digits(b, mis, 2)?;
+            if mis + 2 >= b.len() || b[mis + 2] != b':' {
+                i += 1;
+                continue;
+            }
+            let ss = mis + 3;
+            let s = digits(b, ss, 2)?;
+            return Some((y, mo, d, h, mi, s, 0, ss + 2));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// syslog 时间戳：Oct 10 09:15:32（行首，无年份，用当前年）
+fn syslog_ts(line: &str) -> Option<(i32, u32, u32, u32, u32, u32, u32, usize)> {
+    let b = line.as_bytes();
+    if b.len() < 3 || !b[0].is_ascii_alphabetic() {
+        return None;
+    }
+    let mo = month_num(&b[0..3])?;
+    let mut i = 3;
+    while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+        i += 1;
+    }
+    if i >= b.len() || !b[i].is_ascii_digit() {
+        return None;
+    }
+    let mut d = 0u32;
+    while i < b.len() && b[i].is_ascii_digit() {
+        d = d * 10 + (b[i] - b'0') as u32;
+        i += 1;
+    }
+    while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+        i += 1;
+    }
+    let h = digits(b, i, 2)?;
+    if i + 2 >= b.len() || b[i + 2] != b':' {
+        return None;
+    }
+    let mi = digits(b, i + 3, 2)?;
+    if i + 5 >= b.len() || b[i + 5] != b':' {
+        return None;
+    }
+    let s = digits(b, i + 6, 2)?;
+    let y = Local::now().year();
+    Some((y, mo, d, h, mi, s, 0, i + 8))
+}
+
+/// 3 字母月份缩写 → 数字
+fn month_num(b: &[u8]) -> Option<u32> {
+    let s = std::str::from_utf8(b).ok()?;
+    let m = match s {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    Some(m)
+}
+
+/// 行首时间戳 -> 毫秒时间戳（支持 Java / nginx error / nginx access / syslog 多种格式）
+fn parse_log_time_ms(first: &str) -> Option<i64> {
+    if let Some((y, mo, d, h, mi, s, ms, _)) = parse_ts_fields(first) {
+        return to_epoch(y, mo, d, h, mi, s, ms);
+    }
+    if let Some((y, mo, d, h, mi, s, ms, _)) = nginx_err_ts(first) {
+        return to_epoch(y, mo, d, h, mi, s, ms);
+    }
+    if let Some((y, mo, d, h, mi, s, ms, _)) = nginx_acc_ts(first) {
+        return to_epoch(y, mo, d, h, mi, s, ms);
+    }
+    if let Some((y, mo, d, h, mi, s, ms, _)) = syslog_ts(first) {
+        return to_epoch(y, mo, d, h, mi, s, ms);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nginx_error_is_new_entry_and_time() {
+        let line = "2026/10/10 09:15:32 [error] 1234#0: *5 open() failed";
+        assert!(is_new_entry(line), "nginx error 应识别为新条目");
+        let e = Entry::from_text(line);
+        assert_eq!(e.level, "ERROR");
+        assert!(e.ts_ms.is_some(), "nginx error 应能解析时间");
+    }
+
+    #[test]
+    fn nginx_access_is_new_entry_and_time() {
+        let line = "192.168.1.1 - - [10/Oct/2026:09:15:32 +0000] \"GET /index.html HTTP/1.1\" 200 2326 \"-\" \"Mozilla\"";
+        assert!(is_new_entry(line), "nginx access 应识别为新条目（时间戳在行内）");
+        assert!(Entry::from_text(line).ts_ms.is_some());
+    }
+
+    #[test]
+    fn nginx_error_lines_split_not_merged() {
+        let logs = "2026/10/10 09:15:32 [error] 1: a\n2026/10/10 09:15:33 [warn] 2: b\n2026/10/10 09:15:34 [error] 3: c";
+        let mut merger = Merger::new();
+        let mut count = 0;
+        for l in logs.lines() {
+            if merger.push(l).is_some() {
+                count += 1;
+            }
+        }
+        if merger.flush().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 3, "nginx error 三行应拆成 3 条，而不是合并成 1 条");
+    }
+
+    #[test]
+    fn java_stacktrace_still_merged() {
+        let logs = "2026-10-10 09:15:32.123 INFO  c.F - start\njava.lang.NullPointerException\n\tat c.F.run(F.java:10)\n2026-10-10 09:15:33.456 ERROR c.F - end";
+        let mut merger = Merger::new();
+        let mut count = 0;
+        for l in logs.lines() {
+            if merger.push(l).is_some() {
+                count += 1;
+            }
+        }
+        if merger.flush().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 2, "Java 含堆栈应合并为 2 条，不能有回归");
+    }
+
+    #[test]
+    fn syslog_detected() {
+        let line = "Oct 10 09:15:32 myserver sshd[123]: Failed password";
+        assert!(is_new_entry(line));
+        assert!(Entry::from_text(line).ts_ms.is_some());
+    }
+
+    #[test]
+    fn iso8601_with_tz() {
+        let line = "2026-10-10T09:15:34.789+08:00 DEBUG com.demo.Zoo - iso";
+        assert!(is_new_entry(line));
+        assert!(Entry::from_text(line).ts_ms.is_some());
+    }
 }

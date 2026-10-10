@@ -135,6 +135,8 @@ const props = defineProps({
 })
 
 const MAX_LINES = props.max
+/** 全量视图（all）渲染上限：向上懒加载只增不减，必须封顶，否则 DOM 无限增长撑爆浏览器 */
+const ALL_CAP = 2000
 
 const rows = ref([])
 const loading = ref(false)
@@ -161,7 +163,8 @@ const appName = computed(() => {
 
 const tip = computed(() => {
   if (props.mode === 'all') {
-    return `${rows.value.length} 行 · 已加载${hasMore.value ? '部分' : '全部'}${hasMore.value ? '（可向上滚动继续加载）' : ''}`
+    const capped = rows.value.length >= ALL_CAP
+    return `${rows.value.length} 行 · 已加载${hasMore.value ? '部分' : '全部'}${hasMore.value ? '（向上滚动继续加载）' : ''}${capped ? ' · 已达渲染上限，更早请用时间范围筛选' : ''}`
   }
   return `${rows.value.length} 行 · 首屏最新 ${props.size} 条 · 上限 ${MAX_LINES}`
 })
@@ -217,7 +220,10 @@ async function loadOlder() {
   try {
     const data = await logApi.query(params({ cursor: cursor.value, limit: props.size }))
     const older = decorate(data?.list).reverse()
-    rows.value = older.concat(rows.value)
+    let next = older.concat(rows.value)
+    // 渲染封顶：超出丢弃最旧（顶部）部分，避免无限增长撑爆浏览器
+    if (next.length > ALL_CAP) next = next.slice(0, ALL_CAP)
+    rows.value = next
     cursor.value = data?.nextCursor || null
     hasMore.value = data?.hasMore !== false && !!data?.nextCursor
     await nextTick()
@@ -251,6 +257,21 @@ async function push(r) {
     await nextTick()
     scrollToBottom()
   }
+}
+
+/**
+ * 批量推送（LogView 已按 ~200ms 节流成批）。一次性合并追加 + 封顶 + 滚动一次，
+ * 避免逐条 push 在高日志频率下产生整列表重渲染风暴。
+ */
+function pushMany(list) {
+  if (!list || !list.length) return
+  const added = list.map((r) => ({ ...r, _k: keyOf() }))
+  let next = rows.value.concat(added)
+  const cap = props.mode === 'live' ? MAX_LINES : ALL_CAP
+  if (next.length > cap) next = next.slice(next.length - cap)
+  rows.value = next
+  const follow = props.mode === 'live' ? autoScroll.value : stickBottom.value
+  if (follow) nextTick(scrollToBottom)
 }
 
 function clear() {
@@ -309,7 +330,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onKeydown)
 })
 
-defineExpose({ reload, push, clear })
+defineExpose({ reload, push, pushMany, clear })
 </script>
 
 <style scoped>
@@ -470,6 +491,11 @@ defineExpose({ reload, push, clear })
   color: #e5e7eb;
   font-size: 12.5px;
   line-height: 1.62;
+  /* 单条日志再长也只占用有限高度：完整内容仍在（可内部滚动查看），
+     避免一条几千行的堆栈把整个块撑成几千米高、拖爆布局 */
+  max-height: 360px;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 /* 按级别着色：左边框 + 级别标签，一眼区分条目类型 */
 .line.dg {

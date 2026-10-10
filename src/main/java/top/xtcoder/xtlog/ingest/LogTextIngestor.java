@@ -23,9 +23,28 @@ import top.xtcoder.xtlog.util.HostAddresses;
 @Component
 public class LogTextIngestor {
 
-    /** 行首时间戳：yyyy-MM-dd HH:mm:ss[.SSS]，兼容逗号分隔毫秒（log4j2 风格） */
-    private static final Pattern TS_PATTERN = Pattern.compile(
-            "^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})(?:[.,](\\d{1,3}))?");
+    /**
+     * 行首时间戳识别：支持多种常见格式，做到「只要是日志就能采集」，而非只认 Java/Logback 格式。
+     *   - Java/Logback/ISO8601: 2026-10-10 09:15:32.123  /  2026-10-10T09:15:32+08:00
+     *   - Nginx error:          2026/10/10 09:15:32
+     *   - Nginx access:         [10/Oct/2026:09:15:32 +0000]（时间戳不在行首，允许在行内）
+     *   - Syslog:               Oct 10 09:15:32
+     * 无法识别时间戳的格式（如纯应用输出）仍会被采集，只是按续行规则合并、时间记接收时刻。
+     */
+    private static final Pattern TS_JAVA = Pattern.compile(
+            "^(\\d{4})-(\\d{2})-(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})(?:[.,](\\d{1,3}))?(?:Z|[+-]\\d{2}:?\\d{2})?");
+    private static final Pattern TS_NGINX_ERR = Pattern.compile(
+            "^(\\d{4})/(\\d{2})/(\\d{2})[ T](\\d{2}):(\\d{2}):(\\d{2})");
+    private static final Pattern TS_NGINX_ACC = Pattern.compile(
+            "\\[(\\d{2})/([A-Za-z]{3})/(\\d{4}):(\\d{2}):(\\d{2}):(\\d{2})");
+    private static final Pattern TS_SYSLOG = Pattern.compile(
+            "^([A-Za-z]{3})\\s+(\\d{1,2})\\s+(\\d{2}):(\\d{2}):(\\d{2})");
+
+    private static final java.util.Map<String, Integer> MONTHS = new java.util.HashMap<String, Integer>();
+    static {
+        String[] m = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        for (int i = 0; i < m.length; i++) MONTHS.put(m[i], i + 1);
+    }
 
     private static final Set<String> LEVEL_WORDS = new HashSet<String>(Arrays.asList(
             "TRACE", "DEBUG", "INFO", "NOTICE", "WARN", "WARNING",
@@ -128,36 +147,98 @@ public class LogTextIngestor {
         broadcast.onLog(d);
     }
 
-    /** 解析首行行首时间戳 yyyy-MM-dd HH:mm:ss[.SSS]，失败返回 null */
+    /** 解析首行时间戳，支持多种常见日志格式；全部失败返回 null（由调用方回退到接收时刻） */
     private Date parseLogTime(String text) {
         String first = firstLine(text);
-        Matcher m = TS_PATTERN.matcher(first);
-        if (!m.find()) {
-            return null;
-        }
-        String millis = m.group(7);
-        String pattern = millis == null ? "yyyy-MM-dd HH:mm:ss" : "yyyy-MM-dd HH:mm:ss.SSS";
-        String value = m.group(1) + "-" + m.group(2) + "-" + m.group(3) + " "
-                + m.group(4) + ":" + m.group(5) + ":" + m.group(6);
-        if (millis != null) {
-            value = value + "." + padMillis(millis);
-        }
+        Date d;
+        if ((d = tryJava(first)) != null) return d;
+        if ((d = tryNginxError(first)) != null) return d;
+        if ((d = tryNginxAccess(first)) != null) return d;
+        if ((d = trySyslog(first)) != null) return d;
+        return null;
+    }
+
+    private static Date toDate(int y, int mo, int d, int h, int mi, int s, int ms) {
         try {
-            return new SimpleDateFormat(pattern).parse(value);
-        } catch (ParseException e) {
+            java.time.LocalDateTime ldt = java.time.LocalDateTime.of(y, mo, d, h, mi, s, ms * 1_000_000);
+            return Date.from(ldt.atZone(java.time.ZoneId.systemDefault()).toInstant());
+        } catch (Exception e) {
             return null;
         }
     }
 
-    private static String padMillis(String ms) {
-        if (ms.length() >= 3) {
-            return ms.substring(0, 3);
+    private Date tryJava(String s) {
+        Matcher m = TS_JAVA.matcher(s);
+        if (!m.find() || m.start() != 0) return null;
+        try {
+            int y = Integer.parseInt(m.group(1));
+            int mo = Integer.parseInt(m.group(2));
+            int d = Integer.parseInt(m.group(3));
+            int h = Integer.parseInt(m.group(4));
+            int mi = Integer.parseInt(m.group(5));
+            int sec = Integer.parseInt(m.group(6));
+            int ms = 0;
+            String msStr = m.group(7);
+            if (msStr != null) {
+                ms = Integer.parseInt(msStr) * (int) Math.pow(10, 3 - msStr.length());
+            }
+            return toDate(y, mo, d, h, mi, sec, ms);
+        } catch (Exception e) {
+            return null;
         }
-        StringBuilder sb = new StringBuilder(ms);
-        while (sb.length() < 3) {
-            sb.append('0');
+    }
+
+    private Date tryNginxError(String s) {
+        Matcher m = TS_NGINX_ERR.matcher(s);
+        if (!m.find() || m.start() != 0) return null;
+        try {
+            return toDate(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)),
+                    Integer.parseInt(m.group(3)), Integer.parseInt(m.group(4)),
+                    Integer.parseInt(m.group(5)), Integer.parseInt(m.group(6)), 0);
+        } catch (Exception e) {
+            return null;
         }
-        return sb.toString();
+    }
+
+    private Date tryNginxAccess(String s) {
+        Matcher m = TS_NGINX_ACC.matcher(s);
+        if (!m.find()) return null; // nginx access 时间戳在行内（IP 之后），允许任意位置
+        try {
+            Integer mo = MONTHS.get(m.group(2));
+            if (mo == null) return null;
+            return toDate(Integer.parseInt(m.group(3)), mo, Integer.parseInt(m.group(1)),
+                    Integer.parseInt(m.group(4)), Integer.parseInt(m.group(5)),
+                    Integer.parseInt(m.group(6)), 0);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Date trySyslog(String s) {
+        Matcher m = TS_SYSLOG.matcher(s);
+        if (!m.find() || m.start() != 0) return null;
+        try {
+            Integer mo = MONTHS.get(m.group(1));
+            if (mo == null) return null;
+            int y = java.time.Year.now().getValue();
+            return toDate(y, mo, Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3)),
+                    Integer.parseInt(m.group(4)), Integer.parseInt(m.group(5)), 0);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 跳过首行时间戳，返回其后文本起始位置（用于 logger/线程推断） */
+    private int tsEnd(String first) {
+        Matcher a = TS_JAVA.matcher(first);
+        if (a.find() && a.start() == 0) return a.end();
+        Matcher n = TS_NGINX_ERR.matcher(first);
+        if (n.find() && n.start() == 0) return n.end();
+        Matcher x = TS_NGINX_ACC.matcher(first);
+        if (x.find()) return x.end();
+        Matcher s = TS_SYSLOG.matcher(first);
+        if (s.find() && s.start() == 0) return s.end();
+        return 0;
     }
 
     private String guessLevel(String text) {
@@ -202,8 +283,8 @@ public class LogTextIngestor {
      */
     private String guessLogger(String text) {
         String first = firstLine(text);
-        Matcher m = TS_PATTERN.matcher(first);
-        String rest = m.find() ? first.substring(m.end()).trim() : first;
+        int end = tsEnd(first);
+        String rest = end > 0 ? first.substring(end).trim() : first;
         String[] parts = rest.split("\\s+");
         String fallback = null;
         for (int i = 0; i < parts.length; i++) {
@@ -254,16 +335,30 @@ public class LogTextIngestor {
         return line;
     }
 
-    /** 是否为一条新日志的起始行（行首时间戳 或 首词是级别词） */
+    /** 是否为一条新日志的起始行（行首/行内有可识别的时间戳，或首词是级别词） */
     boolean isNewEntry(String line) {
         if (line == null || line.length() == 0) {
             return false;
         }
-        if (TS_PATTERN.matcher(line).find()) {
+        if (hasTimestamp(line)) {
             return true;
         }
         int sp = line.indexOf(' ');
         String head = (sp > 0 ? line.substring(0, sp) : line).toUpperCase();
         return LEVEL_WORDS.contains(head);
+    }
+
+    /** 行内是否含有可识别的时间戳（nginx access 允许时间戳在行内，其余要求从行首开始） */
+    private boolean hasTimestamp(String line) {
+        if (TS_NGINX_ACC.matcher(line).find()) {
+            return true;
+        }
+        Matcher a = TS_JAVA.matcher(line);
+        if (a.find() && a.start() == 0) return true;
+        Matcher b = TS_NGINX_ERR.matcher(line);
+        if (b.find() && b.start() == 0) return true;
+        Matcher c = TS_SYSLOG.matcher(line);
+        if (c.find() && c.start() == 0) return true;
+        return false;
     }
 }
