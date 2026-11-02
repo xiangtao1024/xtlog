@@ -26,8 +26,8 @@ if not defined XTLOG_DATA_DIR set "XTLOG_DATA_DIR=%APP_HOME%\data"
 if not exist "%APP_HOME%\logs" mkdir "%APP_HOME%\logs"
 if not exist "%XTLOG_DATA_DIR%" mkdir "%XTLOG_DATA_DIR%"
 
-rem extra JVM flags can be appended via env JAVA_OPTS, e.g. set JAVA_OPTS=-Xmx2g
-set "JVM_OPTS=-Xms256m -Xmx512m -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dxtlog.data.dir=%XTLOG_DATA_DIR%"
+rem extra JVM flags can be appended via env JAVA_OPTS, e.g. set JAVA_OPTS=-Xmx4g
+set "JVM_OPTS=-Xms512m -Xmx2g -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dxtlog.data.dir=%XTLOG_DATA_DIR%"
 
 echo [xtlog] APP_HOME = %APP_HOME%
 echo [xtlog] DATA_DIR = %XTLOG_DATA_DIR%

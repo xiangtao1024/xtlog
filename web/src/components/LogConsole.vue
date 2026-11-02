@@ -46,6 +46,11 @@
             <span class="l-lv">{{ pad(r.level) }}</span>
             <span class="l-app" :title="r.logger || '—'">{{ r.logger || '—' }}</span>
             <span
+              v-if="r.cont_seq > 0"
+              class="l-cont"
+              :title="'这条是上一条的继续 · 原日志第 ' + (r.cont_seq + 1) + ' 段'"
+            >续 {{ r.cont_seq + 1 }}</span>
+            <span
               v-if="r.src_ip"
               class="l-ip"
               :title="'来源 IP · ' + r.src_ip"
@@ -102,12 +107,29 @@
           </div>
         </div>
 
+        <!-- 超长日志被拆分保存：提供按组拼回原文 -->
+        <div v-if="detail.row.cont_group" class="d-cont">
+          <span v-if="!grp.loaded" class="d-cont-txt">
+            这条日志超过单条上限，已拆成多段保存（本段为第 {{ detail.row.cont_seq + 1 }} 段）
+          </span>
+          <span v-else class="d-cont-txt">下面是拼接后的完整内容，共 {{ grp.count }} 段</span>
+          <el-button
+            v-if="!grp.loaded"
+            size="small"
+            text
+            type="primary"
+            :loading="grp.loading"
+            @click="loadWholeGroup"
+          >查看完整日志</el-button>
+          <el-button v-else size="small" text @click="grp.loaded = false">只看本段</el-button>
+        </div>
+
         <div class="d-msg">
           <div class="d-msg-h">
-            <label>完整内容</label>
+            <label>{{ grp.loaded ? '完整内容' : '本段内容' }}</label>
             <el-button size="small" text type="primary" @click="copyMsg">复制</el-button>
           </div>
-          <pre class="d-pre mono">{{ detail.row.message }}</pre>
+          <pre class="d-pre mono">{{ shownMsg }}</pre>
         </div>
       </div>
     </el-dialog>
@@ -115,11 +137,11 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { logApi } from '../api'
 import { apps } from '../store/meta'
-import { fmtTime, levelClass } from '../utils/format'
+import { fmtTime, levelClass, toDate } from '../utils/format'
 
 const props = defineProps({
   appId: { type: [Number, String], default: null },
@@ -157,6 +179,7 @@ let seq = 0
 const keyOf = () => `c${++seq}`
 
 const appName = computed(() => {
+  if (props.appId === 'all') return '全部应用'
   const a = apps.value.find((x) => Number(x.id) === Number(props.appId))
   return a?.name || ''
 })
@@ -170,7 +193,8 @@ const tip = computed(() => {
 })
 
 function params(extra) {
-  const p = { appId: props.appId }
+  // appId='all' 表示全部应用，后端不识别，直接不传
+  const p = props.appId && props.appId !== 'all' ? { appId: props.appId } : {}
   const f = props.filters || {}
   if (f.level) p.level = f.level
   if (f.keyword) p.keyword = f.keyword
@@ -297,10 +321,43 @@ function fullText(msg) {
 /* ---------------- 详情弹窗 ---------------- */
 function openDetail(r) {
   detail.value = { visible: true, row: r }
+  grp.loaded = false
+  grp.message = ''
+  grp.count = 0
+  grp.loading = false
+}
+
+/** 超长日志的分片段状态：loaded=true 时详情区显示拼接后的全文 */
+const grp = reactive({ loading: false, loaded: false, message: '', count: 0 })
+
+/** 详情里当前显示的内容：拼了 means 全文就用全文，否则是本段 */
+const shownMsg = computed(() =>
+  grp.loaded ? grp.message : String(detail.value?.row?.message ?? '')
+)
+
+/** 按 cont_group 拉同一条日志的所有片段并拼起来 */
+async function loadWholeGroup() {
+  const row = detail.value?.row
+  if (!row?.cont_group) return
+  grp.loading = true
+  try {
+    const t = toDate(row.log_time)
+    const d = await logApi.group({
+      g: row.cont_group,
+      ...(t ? { ts: t.getTime() } : {})
+    })
+    grp.message = d?.message ?? ''
+    grp.count = d?.count ?? 0
+    grp.loaded = true
+  } catch (e) {
+    ElMessage.error(e?.message || '加载分片失败')
+  } finally {
+    grp.loading = false
+  }
 }
 
 async function copyMsg() {
-  const text = String(detail.value?.row?.message || '')
+  const text = shownMsg.value
   try {
     await navigator.clipboard.writeText(text)
     ElMessage.success('已复制')
@@ -470,6 +527,17 @@ defineExpose({ reload, push, pushMany, clear })
 }
 /* 来源 IP：区分这条日志来自哪台机器（文件/命令采集 = 本机 IP，HTTP = 上报端自带）
    紧跟在 log_time / level / logger 之后显示（不要再 margin-left:auto 顶到行尾） */
+/* 分片续段标记：这条日志是上一条的继续 */
+.l-cont {
+  flex: none;
+  padding: 0 7px;
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  border-radius: 99px;
+  font-size: 10.5px;
+  line-height: 16px;
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+}
 .l-ip {
   flex: none;
   padding: 0 7px;
@@ -491,11 +559,9 @@ defineExpose({ reload, push, pushMany, clear })
   color: #e5e7eb;
   font-size: 12.5px;
   line-height: 1.62;
-  /* 单条日志再长也只占用有限高度：完整内容仍在（可内部滚动查看），
-     避免一条几千行的堆栈把整个块撑成几千米高、拖爆布局 */
-  max-height: 360px;
-  overflow: auto;
-  overscroll-behavior: contain;
+  /* 不内部滚动：内容完整铺开，随外层 .console 一起滚。
+     超大单条（如巨型堆栈）会比较高，由外层统一滚动查看，
+     滚轮也会自然传递到外层，不用把鼠标移到最右侧。 */
 }
 /* 按级别着色：左边框 + 级别标签，一眼区分条目类型 */
 .line.dg {
@@ -557,6 +623,23 @@ defineExpose({ reload, push, pushMany, clear })
   font-size: 13px;
   color: var(--text-1);
   word-break: break-all;
+}
+/* 详情弹窗里的「已拆分为多段」提示条 */
+.d-cont {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 7px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: var(--radius-md, 8px);
+  background: rgba(251, 191, 36, 0.08);
+}
+.d-cont-txt {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-2);
 }
 .d-msg-h {
   display: flex;

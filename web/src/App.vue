@@ -35,10 +35,33 @@
           <span>应用管理</span>
           <span class="nav-badge" v-if="apps.length">{{ apps.length }}</span>
         </router-link>
+        <router-link class="nav-item" :class="{ on: isOn('/analysis') }" to="/analysis">
+          <el-icon><DataAnalysis /></el-icon>
+          <span>日志分析</span>
+        </router-link>
         <router-link class="nav-item" :class="{ on: isOn('/categories') }" to="/categories">
           <el-icon><Collection /></el-icon>
           <span>分类管理</span>
           <span class="nav-badge" v-if="categories.length">{{ categories.length }}</span>
+        </router-link>
+
+        <div class="nav-group">告警</div>
+        <router-link
+          class="nav-item"
+          :class="{ on: isOn('/alerts/rules') }"
+          to="/alerts/rules"
+        >
+          <el-icon><Bell /></el-icon>
+          <span>告警规则</span>
+        </router-link>
+        <router-link
+          class="nav-item"
+          :class="{ on: isOn('/alerts/events') }"
+          to="/alerts/events"
+        >
+          <el-icon><Warning /></el-icon>
+          <span>告警事件</span>
+          <span class="nav-badge danger" v-if="alertFiringCount">{{ alertFiringCount }}</span>
         </router-link>
       </div>
 
@@ -95,6 +118,7 @@
             @click="backToApps"
           >
             <el-icon><Back /></el-icon>
+            <span>返回</span>
           </el-button>
           <div>
             <h1>{{ pageTitle }}</h1>
@@ -114,17 +138,29 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { categories, apps, loadMeta } from './store/meta'
 import { user, initials, loadProfile, logout } from './store/user'
-import { setupApi, onUnauthorized } from './api'
+import { setupApi, alertApi, onUnauthorized } from './api'
 
 const route = useRoute()
 const router = useRouter()
 const dbStatus = ref(null)
 const popOpen = ref(false)
+
+// 触发中的告警事件数：首页侧栏红点提示。30s 轮询一次，失败静默（不影响主界面）。
+const alertFiringCount = ref(0)
+let alertTimer = null
+async function refreshAlertCount() {
+  try {
+    const data = await alertApi.listEvents({ status: 1, page: 1, pageSize: 1 })
+    alertFiringCount.value = Number(data?.total || 0)
+  } catch (e) {
+    // 静默：告警计数失败不应影响主界面
+  }
+}
 
 const isOn = (p) => route.path === p || route.path.startsWith(p + '/')
 
@@ -134,6 +170,8 @@ const isOn = (p) => route.path === p || route.path.startsWith(p + '/')
  */
 const scopedApp = computed(() => {
   if (!route.meta.appScoped) return null
+  // 「日志分析」以全部应用下钻时带 appId=all
+  if (route.query.appId === 'all') return { name: '全部应用' }
   const id = Number(route.query.appId)
   if (!id) return null
   return apps.value.find((a) => Number(a.id) === id) || null
@@ -193,6 +231,13 @@ onMounted(async () => {
   } catch (e) {
     // 首次未初始化时静默，交给页面处理
   }
+  // 启动告警计数轮询：首次立即拉一次，之后每 30s 一次
+  refreshAlertCount()
+  alertTimer = setInterval(refreshAlertCount, 30000)
+})
+
+onBeforeUnmount(() => {
+  if (alertTimer) clearInterval(alertTimer)
 })
 
 defineExpose({ refreshDbStatus: async () => (dbStatus.value = await setupApi.status()) })
@@ -221,6 +266,19 @@ defineExpose({ refreshDbStatus: async () => (dbStatus.value = await setupApi.sta
 }
 .nav-item .nav-badge {
   margin-left: auto;
+}
+.nav-badge.danger {
+  background: var(--danger, #e24b4a);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 6px;
+  height: 18px;
+  min-width: 18px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .user-btn {
   cursor: pointer;
@@ -291,10 +349,21 @@ defineExpose({ refreshDbStatus: async () => (dbStatus.value = await setupApi.sta
   min-width: 0;
 }
 .head-back {
-  width: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   height: 32px;
-  padding: 0;
-  border-radius: 9px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text-2);
   flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.head-back:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 </style>

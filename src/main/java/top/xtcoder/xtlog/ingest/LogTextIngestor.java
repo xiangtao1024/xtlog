@@ -14,6 +14,7 @@ import top.xtcoder.xtboot.context.annotation.Autowired;
 import top.xtcoder.xtboot.context.annotation.Component;
 import top.xtcoder.xtboot.core.Dict;
 import top.xtcoder.xtlog.service.AppService;
+import top.xtcoder.xtlog.service.IngestConfig;
 import top.xtcoder.xtlog.util.HostAddresses;
 
 /**
@@ -54,6 +55,8 @@ public class LogTextIngestor {
     private IngestQueue queue;
     @Autowired
     private LogBroadcast broadcast;
+    @Autowired
+    private IngestConfig ingestConfig;
 
     /** 流式采集（命令采集器）用的按应用续行缓冲：攒到「新条目」再整块 emit */
     private final ConcurrentHashMap<Long, StringBuilder> buffers = new ConcurrentHashMap<Long, StringBuilder>();
@@ -143,8 +146,11 @@ public class LogTextIngestor {
         Date logTime = parseLogTime(text);
         d.put("log_time", logTime != null ? logTime : new Date());
         d.put("receive_time", new Date());
-        queue.offer(d);
-        broadcast.onLog(d);
+        // 与 HTTP 通道一致：超长日志拆成多条连续记录，不丢数据、不截断尾部。
+        for (Dict seg : LogSplitter.expand(d, ingestConfig.maxChars())) {
+            queue.offer(seg);
+            broadcast.onLog(seg);
+        }
     }
 
     /** 解析首行时间戳，支持多种常见日志格式；全部失败返回 null（由调用方回退到接收时刻） */

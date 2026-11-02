@@ -20,8 +20,11 @@ public class AppService {
     @Autowired
     private DbClientHolder holder;
 
-    private final Map<String, AppInfo> tokenMap = new HashMap<String, AppInfo>();
-    private final Map<Long, AppInfo> idMap = new HashMap<Long, AppInfo>();
+    // 用 volatile + 「先建新 map 再整体替换引用」的方式，保证 refresh() 期间任何并发读者
+    // （如 LogBatchWriter 判活）永远看到一份完整一致的索引，而不会在「clear 到 put 完成」之间
+    // 把仍存活的应用误判为「已删除」而把在途日志丢掉。
+    private volatile Map<String, AppInfo> tokenMap = new HashMap<String, AppInfo>();
+    private volatile Map<Long, AppInfo> idMap = new HashMap<Long, AppInfo>();
     /** 是否已加载过。不能用 map.isEmpty() 判断：应用表为空时会退化成「每次调用都查库」 */
     private volatile boolean loaded = false;
 
@@ -34,6 +37,8 @@ public class AppService {
         public String filePaths;
         /** CMD 采集源：要执行的 shell 命令（如 journalctl -u game.service -f -o cat） */
         public String cmd;
+        /** 启用状态：true=启用（接受日志/启动采集），false=停用（拒收推送、不采集）。默认启用。 */
+        public boolean enabled = true;
     }
 
     public synchronized void refresh() {
@@ -41,11 +46,12 @@ public class AppService {
     }
 
     public synchronized void loadAll() {
-        tokenMap.clear();
-        idMap.clear();
-        loaded = false;
+        // 先建全新 map，再一次性替换 volatile 引用：并发读者只会看到「旧全量」或「新全量」，
+        // 不会看到清空中途的半成品，避免 refresh() 期间误判应用已删（见字段说明）。
+        Map<String, AppInfo> newToken = new HashMap<String, AppInfo>();
+        Map<Long, AppInfo> newId = new HashMap<Long, AppInfo>();
         List<Dict> rows = holder.executeQuery(
-                "SELECT id, category_id, name, token, source_type, file_paths, cmd FROM app");
+                "SELECT id, category_id, name, token, source_type, file_paths, cmd, enabled FROM app");
         for (Dict r : rows) {
             AppInfo info = new AppInfo();
             info.id = ((Number) r.get("id")).longValue();
@@ -56,12 +62,32 @@ public class AppService {
             info.sourceType = (String) r.get("source_type");
             info.filePaths = (String) r.get("file_paths");
             info.cmd = (String) r.get("cmd");
+            Object en = r.get("enabled");
+            // 存量应用 enabled 为 NULL → 视为启用；0=false，其它(含 1) = true
+            info.enabled = (en == null) ? true : (toInt(en) != 0);
             if (info.token != null && info.token.length() > 0) {
-                tokenMap.put(info.token, info);
+                newToken.put(info.token, info);
             }
-            idMap.put(info.id, info);
+            newId.put(info.id, info);
         }
+        tokenMap = newToken;
+        idMap = newId;
         loaded = true;
+    }
+
+    /** 把各种可能的数值/字符串表示归一成 int（NULL / 非数字 → 0） */
+    private static int toInt(Object o) {
+        if (o instanceof Number) {
+            return ((Number) o).intValue();
+        }
+        if (o != null) {
+            try {
+                return Integer.parseInt(String.valueOf(o).trim());
+            } catch (Exception ignore) {
+                // 落到 0
+            }
+        }
+        return 0;
     }
 
     public AppInfo resolveByToken(String token) {

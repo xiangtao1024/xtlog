@@ -66,24 +66,16 @@ public class StatsController {
 
         String union = buildUnion(tables);
 
-        // 1) 今日日志数 + 累计日志数（一次扫描）
-        List<Dict> totalRows = holder.executeQuery(
-                "SELECT COUNT(*) AS total,"
-                        + " SUM(CASE WHEN log_time >= ? THEN 1 ELSE 0 END) AS today"
-                        + " FROM (" + union + ") t",
+        // 1) 总数：覆盖索引 COUNT，毫秒级（只走索引 b-tree，不读几十 KB 的 message 文本）
+        long totalCount = countLong("SELECT COUNT(*) AS c FROM (" + union + ") t");
+        // 2) 今日数：log_time 范围扫描（idx_*_time 索引）
+        long todayCount = countLong(
+                "SELECT COUNT(*) AS c FROM (" + union + ") t WHERE log_time >= ?",
                 Long.valueOf(startOfToday));
-        long todayCount = 0L;
-        long totalCount = 0L;
-        if (!totalRows.isEmpty()) {
-            Object t = totalRows.get(0).get("today");
-            Object c = totalRows.get(0).get("total");
-            todayCount = toLong(t);
-            totalCount = toLong(c);
-        }
-        data.put("todayCount", Long.valueOf(todayCount));
         data.put("totalCount", Long.valueOf(totalCount));
+        data.put("todayCount", Long.valueOf(todayCount));
 
-        // 2) 今日级别分布
+        // 3) 今日级别分布（idx_*_leveltime 索引：level + 时间范围）
         List<Dict> levelRows = holder.executeQuery(
                 "SELECT level, COUNT(*) AS c FROM (" + union + ") t"
                         + " WHERE log_time >= ? GROUP BY level ORDER BY c DESC",
@@ -108,11 +100,10 @@ public class StatsController {
         }
         data.put("levelStats", levelStats);
 
-        // 3) 近 7 日趋势
-        List<Dict> trendRows = queryTrend(union, now);
-        data.put("trend", trendRows);
+        // 4) 近 7 日趋势（以天为粒度对 log_time 做范围聚合，走 idx_*_time 索引）
+        data.put("trend", buildTrend(union, now));
 
-        // 4) 今日 Top 应用
+        // 5) 今日 Top 应用（idx_*_apptime 索引：app_id + 时间范围）
         List<Dict> topRows = holder.executeQuery(
                 "SELECT app_id, COUNT(*) AS c FROM (" + union + ") t"
                         + " WHERE log_time >= ? GROUP BY app_id ORDER BY c DESC LIMIT 5",
@@ -132,43 +123,38 @@ public class StatsController {
         return ApiResponse.ok(data);
     }
 
-    /** 7 天趋势：一次扫描 + SUM(CASE WHEN) */
-    private List<Dict> queryTrend(String union, long now) {
-        StringBuilder sql = new StringBuilder("SELECT ");
-        List<Object> params = new ArrayList<Object>();
-        List<Long> bounds = new ArrayList<Long>();
+    /**
+     * 7 天趋势：以「天」为粒度对 log_time 做范围聚合（走 idx_*_time 索引）。
+     * 一次查询：WHERE log_time >= 7天前，再按天分组计数；没有数据的天补 0。
+     */
+    private List<Dict> buildTrend(String union, long now) {
+        long sevenAgo = startOfDay(now) - 6L * 86400000L;
+        List<Dict> rows = holder.executeQuery(
+                "SELECT CAST(log_time/86400000 AS INTEGER) AS d, COUNT(*) AS c"
+                        + " FROM (" + union + ") t WHERE log_time >= ? GROUP BY d",
+                Long.valueOf(sevenAgo));
+        java.util.Map<Long, Long> map = new java.util.HashMap<Long, Long>();
+        for (Dict r : rows) {
+            map.put(Long.valueOf(toLong(r.get("d"))), Long.valueOf(toLong(r.get("c"))));
+        }
+        SimpleDateFormat sdf = new SimpleDateFormat("MM-dd");
+        List<Dict> trend = new ArrayList<Dict>();
         Calendar c = Calendar.getInstance();
         c.setTimeInMillis(now);
         c.set(Calendar.HOUR_OF_DAY, 0);
         c.set(Calendar.MINUTE, 0);
         c.set(Calendar.SECOND, 0);
         c.set(Calendar.MILLISECOND, 0);
-        // 往前推 6 天
         c.add(Calendar.DAY_OF_MONTH, -6);
         for (int i = 0; i < 7; i++) {
-            long from = c.getTimeInMillis();
-            c.add(Calendar.DAY_OF_MONTH, 1);
-            long to = c.getTimeInMillis();
-            bounds.add(Long.valueOf(from));
-            if (i > 0) {
-                sql.append(", ");
-            }
-            sql.append("SUM(CASE WHEN log_time >= ? AND log_time < ? THEN 1 ELSE 0 END) AS d").append(i);
-            params.add(Long.valueOf(from));
-            params.add(Long.valueOf(to));
-        }
-        sql.append(" FROM (").append(union).append(") t");
-
-        List<Dict> rows = holder.executeQuery(sql.toString(), params.toArray());
-        Dict row = rows.isEmpty() ? new Dict() : rows.get(0);
-
-        SimpleDateFormat sdf = new SimpleDateFormat("MM-dd");
-        List<Dict> trend = new ArrayList<Dict>();
-        for (int i = 0; i < 7; i++) {
+            long midnight = c.getTimeInMillis();
+            long dayKey = midnight / 86400000L;
             Dict d = new Dict();
-            d.put("date", sdf.format(new Date(bounds.get(i).longValue())));
-            d.put("count", toLongBox(row.get("d" + i)));
+            d.put("date", sdf.format(new Date(midnight)));
+            Long v = map.get(Long.valueOf(dayKey));
+            d.put("count", Long.valueOf(v == null ? 0L : v.longValue()));
             trend.add(d);
+            c.add(Calendar.DAY_OF_MONTH, 1);
         }
         return trend;
     }
@@ -210,6 +196,15 @@ public class StatsController {
         return toLong(rows.get(0).get("c"));
     }
 
+    /** 带参数的 COUNT 助手（覆盖索引扫描，毫秒级） */
+    private long countLong(String sql, Object... params) {
+        List<Dict> rows = holder.executeQuery(sql, params);
+        if (rows.isEmpty()) {
+            return 0L;
+        }
+        return toLong(rows.get(0).get("c"));
+    }
+
     private long findCount(List<Dict> rows, String level) {
         for (Dict r : rows) {
             if (level.equals(String.valueOf(r.get("level")))) {
@@ -238,18 +233,13 @@ public class StatsController {
         return c.getTimeInMillis();
     }
 
+    /**
+     * 宽松的数值读取：SQLite 返回 Long，MySQL 可能返回 BigDecimal / Long，PG 返回 Long；
+     * 时间列在 MySQL 上是 {@code java.time.LocalDateTime}，统一交给
+     * {@link DataSourceConfig#tsOf(Object, long)} 归一成毫秒，避免 ClassCastException。
+     */
     private static long toLong(Object o) {
-        if (o == null) {
-            return 0L;
-        }
-        if (o instanceof Number) {
-            return ((Number) o).longValue();
-        }
-        try {
-            return Long.parseLong(String.valueOf(o));
-        } catch (Exception e) {
-            return 0L;
-        }
+        return DataSourceConfig.tsOf(o, 0L);
     }
 
     private static Long toLongBox(Object o) {

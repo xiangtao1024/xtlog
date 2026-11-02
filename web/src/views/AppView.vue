@@ -63,6 +63,23 @@
             </span>
           </template>
         </el-table-column>
+        <el-table-column label="状态" width="92" align="center">
+          <template #default="{ row }">
+            <el-tag :type="isDisabled(row) ? 'info' : 'success'" size="small" effect="light">
+              {{ isDisabled(row) ? '已停用' : '启用中' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="日志数" width="96" align="right">
+          <template #default="{ row }">
+            <span class="mono num cnt">{{ row.log_count == null ? 0 : row.log_count }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="最新日志" width="196">
+          <template #default="{ row }">
+            <span class="mono num ts">{{ fmtTime(row.last_log_time) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="Token" min-width="200">
           <template #default="{ row }">
             <span class="mono small tk">{{ row.token }}</span>
@@ -75,12 +92,26 @@
             <span class="mono num ts">{{ fmtTime(row.create_time) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="270" fixed="right">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="openLogs(row)">查看日志</el-button>
-            <el-button link type="primary" size="small" @click="openDevConfig(row)">开发配置</el-button>
-            <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="doDelete(row)">删除</el-button>
+            <div class="ops">
+              <el-button link type="primary" size="small" @click="openLogs(row)">查看日志</el-button>
+              <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+              <el-dropdown trigger="click" @command="(cmd) => onCommand(cmd, row)">
+                <el-button link type="primary" size="small">
+                  更多<el-icon style="margin-left: 2px"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item :command="isDisabled(row) ? 'enable' : 'disable'">
+                      {{ isDisabled(row) ? '启用' : '停用' }}
+                    </el-dropdown-item>
+                    <el-dropdown-item command="devConfig">开发配置</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
         <template #empty>
@@ -270,9 +301,39 @@ async function submit() {
   }
 }
 
+async function toggleEnabled(row) {
+  // 后端 enabled 是 INTEGER(0/1)，NULL 视为启用；统一先转成布尔再取反。
+  // 旧表达式 `!(row.enabled === false)` 在数值/ NULL 下恒为 true，导致点「停用」反而「启用」。
+  const isOn = !isDisabled(row)
+  const target = !isOn
+  try {
+    await appApi.setEnabled(row.id, target)
+    row.enabled = target
+    ElMessage.success(target ? '已启用，开始接收日志' : '已停用，停止接收日志')
+  } catch (e) {
+    ElMessage.error(e.message || '操作失败')
+  }
+}
+
+/** 停用判定：后端可能返回布尔 false 或数值 0；NULL(存量)视为启用 */
+function isDisabled(row) {
+  return row.enabled === false || row.enabled === 0
+}
+
+/** 更多下拉：enable/disable 走 toggleEnabled，其余各归各位 */
+function onCommand(cmd, row) {
+  if (cmd === 'enable' || cmd === 'disable') {
+    toggleEnabled(row)
+  } else if (cmd === 'devConfig') {
+    openDevConfig(row)
+  } else if (cmd === 'delete') {
+    doDelete(row)
+  }
+}
+
 async function doDelete(row) {
   try {
-    await ElMessageBox.confirm(`删除应用「${row.name}」？该操作不可恢复。`, '确认删除', {
+    await ElMessageBox.confirm(`删除应用「${row.name}」？该操作不可恢复（含其全部日志）。`, '确认删除', {
       confirmButtonText: '删除',
       cancelButtonText: '取消',
       type: 'warning'
@@ -341,6 +402,10 @@ onMounted(async () => {
   /* 时间戳不允许折行，宽度不够时由列宽兜住 */
   white-space: nowrap;
 }
+.cnt {
+  font-weight: 600;
+  color: var(--text-1);
+}
 .num {
   font-variant-numeric: tabular-nums;
 }
@@ -362,5 +427,18 @@ onMounted(async () => {
   justify-content: flex-end;
   padding: 12px 18px;
   border-top: 1px solid var(--line-2);
+}
+/* 操作列三个控件统一水平排列并垂直居中对齐，避免 el-dropdown 包裹层
+   与相邻 el-button 基线不一致导致的「更多」按钮偏上 */
+.ops {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 10px;
+}
+/* 关掉 Element Plus 默认的 .el-button + .el-button { margin-left:12px }，
+   否则只有「查看日志→编辑」吃这 12px，会出现「前两远、后两近」的间距不均 */
+.ops :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 </style>

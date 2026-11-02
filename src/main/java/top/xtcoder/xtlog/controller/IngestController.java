@@ -13,7 +13,9 @@ import top.xtcoder.xtboot.web.model.ApiResponse;
 
 import top.xtcoder.xtlog.ingest.IngestQueue;
 import top.xtcoder.xtlog.ingest.LogBroadcast;
+import top.xtcoder.xtlog.ingest.LogSplitter;
 import top.xtcoder.xtlog.service.AppService;
+import top.xtcoder.xtlog.service.IngestConfig;
 
 /**
  * 日志摄入接口：业务方通过 HTTP 把日志 POST 过来。
@@ -41,6 +43,9 @@ public class IngestController {
     @Autowired
     private AppService appService;
 
+    @Autowired
+    private IngestConfig ingestConfig;
+
     @PostMapping("/api/logs")
     public Object ingest(@RequestBody Dict body) {
         String token = (String) body.get("token");
@@ -48,6 +53,14 @@ public class IngestController {
         if (app == null) {
             Dict r = new Dict();
             r.put("error", "invalid token");
+            return ApiResponse.ok(r);
+        }
+        // 应用已停用：HTTP 推送直接丢弃（用户要求「推过来直接丢」），不写库、不广播
+        if (!app.enabled) {
+            Dict r = new Dict();
+            r.put("disabled", true);
+            r.put("accepted", 0);
+            r.put("message", "应用已停用，日志已丢弃");
             return ApiResponse.ok(r);
         }
         Object logs = body.get("logs");
@@ -69,6 +82,10 @@ public class IngestController {
         }
         Dict r = new Dict();
         r.put("accepted", count);
+        // 如实暴露队列积压与累计丢弃，避免「accepted 成功却丢了数据」的静默误导
+        r.put("queueSize", queue.size());
+        r.put("queueBytes", queue.queuedBytes());
+        r.put("droppedTotal", queue.getDropped());
         int badChars = countReplacementChars(body);
         if (badChars > 0) {
             r.put("encodingWarning", "检测到 " + badChars + " 个乱码字符(U+FFFD)，请求体不是合法 UTF-8。"
@@ -124,8 +141,14 @@ public class IngestController {
         long logTime = (ts instanceof Number) ? ((Number) ts).longValue() : System.currentTimeMillis();
         d.put("log_time", new Date(logTime));
         d.put("receive_time", new Date());
-        queue.offer(d);
-        broadcast.onLog(d);
+        // 超长日志（本库实测单条最大 7.6MB）会拖垮索引体积与渲染，这里按需拆成多条连续记录，
+        // 共享 cont_group、cont_seq 递增，界面上标「续」并可拼回原文。放在入队前处理，
+        // 存储与实时广播两条链路就都能拿到分片结果。
+        // 注意 expand 返回的是新 Dict 列表，广播与入库必须用这些副本，不能用原来的 d。
+        for (Dict seg : LogSplitter.expand(d, ingestConfig.maxChars())) {
+            queue.offer(seg);
+            broadcast.onLog(seg);
+        }
     }
 
     private static String str(Object o, String def) {

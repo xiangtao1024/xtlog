@@ -42,7 +42,7 @@ echo [xtlog] starting in background ...
 powershell -NoProfile -Command ^
   "$ErrorActionPreference='Stop';" ^
   "$a = [System.Collections.Generic.List[string]]::new();" ^
-  "foreach($x in @('-Xms256m','-Xmx512m','-Dfile.encoding=UTF-8','-Dsun.stdout.encoding=UTF-8','-Dsun.stderr.encoding=UTF-8','-Dxtlog.data.dir=%XTLOG_DATA_DIR%')) { $a.Add($x) };" ^
+  "foreach($x in @('-Xms512m','-Xmx2g','-Dfile.encoding=UTF-8','-Dsun.stdout.encoding=UTF-8','-Dsun.stderr.encoding=UTF-8','-Dxtlog.data.dir=%XTLOG_DATA_DIR%')) { $a.Add($x) };" ^
   "if ('%JAVA_OPTS%'.Trim()) { foreach($x in ('%JAVA_OPTS%'.Trim() -split '\s+')) { $a.Add($x) } };" ^
   "$a.Add('-cp'); $a.Add('%APP_HOME%\config;%APP_HOME%\xtlog-server.jar;%APP_HOME%\drivers\*');" ^
   "$a.Add('top.xtcoder.xtlog.XtLogApplication');" ^

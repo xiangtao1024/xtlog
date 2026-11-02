@@ -17,8 +17,10 @@ XTLOG_DATA_DIR=${XTLOG_DATA_DIR:-"$APP_HOME/data"}
 
 mkdir -p "$APP_HOME/logs" "$XTLOG_DATA_DIR"
 
-# 额外 JVM 参数可通过环境变量 JAVA_OPTS 追加（例如 JAVA_OPTS="-Xmx1g"）
-JVM_OPTS="-Xms256m -Xmx512m -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dxtlog.data.dir=$XTLOG_DATA_DIR"
+# 额外 JVM 参数可通过环境变量 JAVA_OPTS 追加（例如 JAVA_OPTS="-Xmx4g"）
+# 默认给 2g：摄入队列按「字节预算」封顶（默认 200MB），再给 FTS / 查询 / 连接池留足余量。
+# 大日志单条可达数 MB、月表达几十 GB，1g 偏紧。
+JVM_OPTS="-Xms512m -Xmx2g -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dxtlog.data.dir=$XTLOG_DATA_DIR"
 
 echo "[xtlog] APP_HOME = $APP_HOME"
 echo "[xtlog] DATA_DIR = $XTLOG_DATA_DIR"

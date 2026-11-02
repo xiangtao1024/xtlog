@@ -1,15 +1,33 @@
 # xtlog-server
 
-**轻量统一日志服务：一处接入，多来源汇聚，集中查看。**
+**单机轻量统一日志台：开箱即用、数据不出门、不挑日志格式。**
 
-对标 ELK / Graylog / Loki 的**轻量单机替代品** —— 不需要 Elasticsearch、不需要容器、不需要学查询语法。
-一个 jar 跑起来，建个应用、配个路径，日志就能看了。
+一个 jar 跑起来，建个应用、配个路径，日志就能看了。**不是 ELK 的功能子集，而是 `tail -f` + 多个 SSH 窗口的替代品**——给那些被 ELK 劝退、又不想把日志塞给 SaaS 的中小团队 / 个人开发者。
 
-| | ELK 全家桶 | xtlog-server |
+| | Seq / Papertrail / Better Stack | xtlog-server |
 |---|---|---|
-| 部署 | ES + Logstash + Kibana，内存 4G 起 | 单个 jar + 一个 db 文件，512M 能跑 |
-| 上手 | 要学 Lucene 语法 | 建个应用、配个路径，点开就能看 |
-| 对象 | 中大型团队专业运维 | 中小团队 / 个人开发者 / 多语言小项目群 |
+| 部署 | SaaS 或单机二进制，多数要走外网 | 单 jar + SQLite，512M 内存能跑，**数据完全在本机** |
+| 上手 | 注册账号 / 装 agent | 建应用、配路径，点开就能看 |
+| 采集方式 | 上报为主 | HTTP / FILE / CMD / Rust 客户端 四种 |
+| 日志格式 | 多需 agent 适配 | **不挑格式**，Java / nginx / syslog / 任意文本通吃 |
+| 告警 | 商业版才有或限额 | **内置规则引擎 + Webhook**（v0.0.2） |
+| 对象 | 个人开发者 / 小团队 | 中小团队 / 个人 / 多语言小项目群 / 老服务器 |
+
+**一句话**：让一个同时跑着 SpringBoot、Flask、Express 的人，5 分钟内搭起统一日志台，还能在 ERROR 突增时打到钉钉 / 飞书。
+
+核心取舍：**单机优先、零外部依赖、数据不出门**。所有重能力（集群、链路追踪、Grafana 数据源）都不做——它们和你无关时，单机就是最优解。
+
+---
+
+## 何时选 xtlog-server
+
+- 你的日志分布在 1～5 台机器上，没有专职运维
+- 你不想把日志推到 SaaS（合规、成本、网络不稳）
+- 你被 ELK / Graylog 的 4G+ 内存、Lucene DSL、索引调优劝退过
+- 你的服务器是老的 1C2G VPS、树莓派、嵌入式 Linux
+- 你想给 Nginx / journalctl / Spring Boot 一个**统一的查看入口 + 告警**
+
+**不适合**：日志量 > 50GB/天、需要分布式集群、需要 Grafana 数据源协议、需要完整链路追踪体系。这种场景请上 ELK / Loki / OpenObserve。
 
 ---
 
@@ -27,6 +45,69 @@
 - **分类管理**：树形分类，按业务线/环境组织应用
 - **零外部依赖**：自带 SQLite 驱动，默认 `data/xtlog.db`（WAL）；需要 MySQL / PostgreSQL 时丢个驱动 jar 进 `drivers/` 即可
 - **按月分表**：日志表 `xt_log_entry_YYYYMM`，历史查询自动 UNION，无需手工维护
+- **告警规则与事件中心（v0.0.2）**：按级别 / 关键词 / 正则 / 速率定义触发条件，配评估窗口、阈值、静默时长与 Webhook；触发后产生事件、自动恢复、支持认领，事件页 30 秒自动刷新
+
+---
+
+## 告警
+
+xtlog 内置规则引擎，每 30 秒扫描一次启用的规则，在评估窗口内对日志月表聚合匹配，命中数 ≥ 阈值时生成事件并触发 Webhook。事件在静默窗口内自动合并（避免反复告警），命中数降到阈值一半以下时自动标记恢复。
+
+### 规则类型
+
+| 类型 | 表达式 | 说明 |
+|---|---|---|
+| `LEVEL` | `ERROR` 或 `ERROR,WARN` | 多级逗号分隔，按 `level` 字段精确匹配 |
+| `KEYWORD` | 任意文本 | 按 `message LIKE '%kw%'` 模糊匹配 |
+| `REGEX` | Java 正则（如 `\bTimeoutException\b`） | 先按时间窗拉候选行（最多 1000 条），Java 侧用 `Pattern` 过滤；为兼容各库正则函数差异做的折衷 |
+| `RATE` | 级别词（如 `ERROR`） | 与 LEVEL 同语义，配短窗口（如 60s）+ 高阈值表达「N 次/分钟」 |
+
+### 关键参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| 评估窗口 `window_sec` | 300 秒 | 引擎每次扫描覆盖最近 N 秒的日志 |
+| 触发阈值 `threshold` | 1 | 窗口内命中数 ≥ 该值即触发 |
+| 静默时长 `silence_sec` | 600 秒 | 触发后该时长内合并到同一事件，不重复告警 |
+| 作用应用 `app_id` | 全部 | 0/空 表示作用于所有应用，否则只评估指定应用 |
+| 通知渠道 `channels` | — | JSON 形式，目前支持 `{"webhook":"https://..."}`，后续扩展钉钉 / 飞书 / 邮件 |
+
+### 接入示例
+
+在「告警规则」页新建规则，或直接调 API：
+
+```bash
+# 创建规则：订单服务 ERROR 频繁告警，5 分钟内 ≥ 10 条触发，触发后静默 30 分钟
+curl -X POST http://localhost:18080/api/alert/rules \
+  -H "Content-Type: application/json" \
+  -H "satoken: <登录会话 token>" \
+  -d '{
+    "name":"订单服务 ERROR 告警",
+    "appId":12,
+    "ruleType":"LEVEL",
+    "ruleExpr":"ERROR",
+    "windowSec":300,
+    "threshold":10,
+    "silenceSec":1800,
+    "channels":"{\"webhook\":\"https://oapi.dingtalk.com/robot/send?access_token=xxx\"}"
+  }'
+```
+
+### Webhook payload
+
+触发时以 POST JSON 通知配置的地址，字段含 `event_id` / `rule_id` / `rule_name` / `app_id` / `app_name` / `level` / `hit_count` / `threshold` / `window_sec` / `summary` / `sample_message`（截断到 1000 字）。可直接转给钉钉 / 飞书 / 企业微信 / Slack 的入站机器人。
+
+### 事件生命周期
+
+```
+新建（status=1 触发中）
+  ↓ 30s 后再次命中：静默窗口内 → 合并（更新 hit_count / last_time / 样本）
+  ↓ 静默窗口过期：旧事件标记恢复(status=2)，新事件触发并再发 Webhook
+  ↓ 命中数 < threshold/2：自动标记恢复(status=2)
+  ↓ 人工认领：status=3 已认领
+```
+
+事件可手动认领、手动标记恢复，也可在「告警事件」页 30 秒自动刷新查看最新状态。
 
 ---
 
@@ -245,8 +326,10 @@ FILE/CMD 的「本机 IP」由 `HostAddresses` **打分优选**得出（网段 1
 
 ## 路线图 / 待办
 
-- [ ] 告警规则（关键字 / 级别 / 频率，静默窗口，Webhook）
+- [x] **告警规则与事件中心**（v0.0.2：级别 / 关键词 / 正则 / 速率，评估窗口 + 阈值 + 静默 + Webhook + 认领/恢复）
 - [ ] 日志删除与导出 API
 - [ ] journald `-o json` 的 PRIORITY → 级别映射
 - [ ] xtlog-client 支持 https（当前需 nginx 做 TLS 终结）
 - [ ] xtlog-client 的 Linux 预编译二进制与 systemd 守护示例
+- [ ] 告警渠道扩展：钉钉 / 飞书 / 企业微信机器人模板消息
+- [ ] 告警规则模板库（常见场景：ERROR 频次、超时堆栈、5xx 风暴）

@@ -35,10 +35,28 @@ const routes = [
     meta: { title: '查看日志', sub: '', menu: false, back: true, appScoped: true }
   },
   {
+    path: '/analysis',
+    name: 'analysis',
+    component: () => import('../views/AnalysisView.vue'),
+    meta: { title: '日志分析', sub: '按应用统计趋势、级别分布、热点排名与错误聚类' }
+  },
+  {
     path: '/categories',
     name: 'categories',
     component: () => import('../views/CategoryView.vue'),
     meta: { title: '分类管理', sub: '按业务域归类，应用挂载在分类下' }
+  },
+  {
+    path: '/alerts/rules',
+    name: 'alert-rules',
+    component: () => import('../views/AlertRulesView.vue'),
+    meta: { title: '告警规则', sub: '按级别 / 关键词 / 正则 / 速率定义触发条件' }
+  },
+  {
+    path: '/alerts/events',
+    name: 'alert-events',
+    component: () => import('../views/AlertEventsView.vue'),
+    meta: { title: '告警事件', sub: '查看触发记录、认领与恢复' }
   },
   {
     // 与 /logs 一样是应用级页面：不入菜单，只能从应用管理带 appId 进入

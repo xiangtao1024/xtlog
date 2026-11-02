@@ -60,6 +60,9 @@ public class CommandCollector {
             if (!"CMD".equalsIgnoreCase(app.sourceType)) {
                 continue;
             }
+            if (!app.enabled) {
+                continue; // 已停用：不启动采集
+            }
             if (app.cmd == null || app.cmd.trim().length() == 0) {
                 continue;
             }
@@ -81,6 +84,7 @@ public class CommandCollector {
             AppService.AppInfo app = appService.resolveById(id);
             Running r = running.get(id);
             boolean stale = app == null
+                    || !app.enabled
                     || !"CMD".equalsIgnoreCase(app.sourceType)
                     || app.cmd == null
                     || r == null

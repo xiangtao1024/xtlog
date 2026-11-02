@@ -56,13 +56,9 @@ public class SetupController {
             url = url + (url.indexOf('?') >= 0 ? "&" : "?")
                     + "journal_mode=WAL&synchronous=NORMAL&busy_timeout=5000";
         }
-        DbClient db = DbClient.create(url, user, password);
-        DbClientHolder newHolder = new DbClientHolder(db);
-        DataSourceConfig.initSchema(newHolder);
-        holder.replace(db);
-        appService.refresh();
-        // 持久化到 dataDir()/datasource.properties，重启后自动生效（避免每次启动回到默认 SQLite）
-        DataSourceConfig.saveDatasource(url, user, password);
+        // 统一走 DatasourceController：预建库（MySQL/PG）+ 热替换 + 建表 + 持久化 + 登记数据源记录，
+        // 这样这次切换也会留在「数据源记录」里，之后可以一键切回。
+        DatasourceController.doSwitch(holder, appService, dbType, url, user, password);
 
         Dict d = new Dict();
         d.put("ok", true);

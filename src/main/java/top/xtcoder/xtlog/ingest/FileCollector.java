@@ -53,6 +53,9 @@ public class FileCollector {
             if (!"FILE".equalsIgnoreCase(app.sourceType)) {
                 continue;
             }
+            if (!app.enabled) {
+                continue; // 已停用：不采集
+            }
             if (app.filePaths == null || app.filePaths.length() == 0) {
                 continue;
             }

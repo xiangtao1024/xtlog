@@ -37,7 +37,7 @@ Environment="XTLOG_DATA_DIR=/opt/xtlog-server/data"
 # Environment="XTLOG_HOST_IP=192.168.1.10"
 
 # ---------- 启动命令 ----------
-# 注意：JVM 内存参数直接写在这里（-Xms256m -Xmx1g，按机器内存调）。
+# 注意：JVM 内存参数直接写在这里（-Xms512m -Xmx2g，按机器内存调；大日志单条可达数 MB、月表达几十 GB，1g 偏紧）。
 # 不要改用 Environment="JAVA_OPTS=-Xms256m -Xmx1g" 再 ${JAVA_OPTS} 引用 ——
 # systemd 展开环境变量后不会按空格拆词，多个参数会被当成一整个参数传给 java，
 # 直接报 "Unrecognized option"。单值的 JAVA_HOME / XTLOG_DATA_DIR 没有这个问题。
@@ -45,7 +45,7 @@ Environment="XTLOG_DATA_DIR=/opt/xtlog-server/data"
 # 另一个关键点：classpath 里 config 必须排在 jar 前面，
 # 外置的 application.properties（端口等）才会覆盖 jar 内置的那份。
 # drivers/* 由 JVM 展开，放入 MySQL / PostgreSQL 驱动 jar 即可生效。
-ExecStart=${JAVA_HOME}/bin/java -Xms256m -Xmx1g \
+ExecStart=${JAVA_HOME}/bin/java -Xms512m -Xmx2g \
   -Dfile.encoding=UTF-8 \
   -Dsun.stdout.encoding=UTF-8 \
   -Dsun.stderr.encoding=UTF-8 \

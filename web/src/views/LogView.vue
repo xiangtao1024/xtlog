@@ -24,7 +24,6 @@
           <el-date-picker
             v-model="range"
             type="datetimerange"
-            value-format="x"
             range-separator="→"
             start-placeholder="日志开始时间"
             end-placeholder="日志结束时间"
@@ -44,10 +43,34 @@
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
 
+          <el-input
+            v-model="filters.srcIp"
+            placeholder="来源 IP"
+            clearable
+            style="width: 150px"
+            @keyup.enter="reloadAll"
+            @clear="reloadAll"
+          >
+            <template #prefix><el-icon><Monitor /></el-icon></template>
+          </el-input>
+
           <el-button type="primary" :loading="loading" @click="reloadAll">查询</el-button>
           <el-button @click="reset">重置</el-button>
 
           <div class="spacer"></div>
+
+          <!-- 关键词没走成全文索引时给个明确说法，避免用户以为系统卡死 -->
+          <el-tooltip
+            v-if="ftsSkipped"
+            placement="bottom"
+            :show-after="150"
+            content="全文索引按连续 3 字符切词，关键词太短时无法命中索引，只能逐条扫描正文。输入 3 个字符以上即可秒回。"
+          >
+            <span class="chip warn sq">
+              <el-icon><Warning /></el-icon>
+              关键词过短，未走索引
+            </span>
+          </el-tooltip>
 
           <div class="live">
             <span class="dot" :class="live ? 'ok' : 'off'"></span>
@@ -142,6 +165,11 @@
               </el-table-column>
               <el-table-column label="内容" min-width="320">
                 <template #default="{ row }">
+                  <span
+                    v-if="row.cont_seq > 0"
+                    class="chip sq cont-chip"
+                    :title="'这条是上一条的继续 · 原日志第 ' + (row.cont_seq + 1) + ' 段'"
+                  >续 {{ row.cont_seq + 1 }}</span>
                   <span class="msg mono">{{ row.message }}</span>
                 </template>
               </el-table-column>
@@ -168,8 +196,10 @@ import { fmtTime, levelClass, LEVEL_OPTIONS } from '../utils/format'
 const route = useRoute()
 const router = useRouter()
 
-// 日志页不占侧栏菜单：只能从应用列表点进来，应用固定，页面里不做应用选择
-const appId = route.query.appId ? Number(route.query.appId) : null
+// 日志页不占侧栏菜单：从应用列表或「日志分析」下钻进来。
+// appId 支持 'all'（分析页「全部应用」下钻），此时不向后端传 appId。
+const rawAppId = route.query.appId ? String(route.query.appId) : null
+const appId = rawAppId === 'all' ? 'all' : rawAppId ? Number(rawAppId) : null
 
 const tab = ref('console')
 
@@ -180,6 +210,8 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const scannedTables = ref([])
+/** 上一次查询的关键词没能走全文索引（通常是少于 3 个字符） */
+const ftsSkipped = ref(false)
 const live = ref(false)
 const liveCount = ref(0)
 
@@ -189,20 +221,41 @@ const allConsoleRef = ref(null)
 
 const defaultTime = [new Date(2000, 0, 1, 0, 0, 0), new Date(2000, 0, 1, 23, 59, 59)]
 
-const filters = reactive({ level: null, keyword: '' })
-const range = ref(null)
+// 支持从「日志分析」下钻过来：带上 keyword / level / srcIp / 时间范围。
+// query 里是毫秒时间戳字符串，转成 Date 给日期组件（组件对时间戳字符串解析不可靠）
+const filters = reactive({
+  level: route.query.level || null,
+  keyword: route.query.keyword || '',
+  srcIp: route.query.srcIp || ''
+})
+const range = ref(
+  route.query.startTime && route.query.endTime
+    ? [new Date(Number(route.query.startTime)), new Date(Number(route.query.endTime))]
+    : null
+)
 
 let seq = 0
 const keyOf = () => `r${++seq}`
 
-const currentApp = computed(() => apps.value.find((a) => Number(a.id) === Number(appId)))
+const currentApp = computed(() =>
+  appId === 'all' ? null : apps.value.find((a) => Number(a.id) === Number(appId))
+)
+
+/** 页头标题：全部应用模式下显示「全部应用」 */
+const appTitle = computed(() => (appId === 'all' ? '全部应用' : currentApp.value?.name || ''))
+
+/** Date / 时间戳统一转毫秒数，供接口与 SSE 使用 */
+function toMs(v) {
+  if (v instanceof Date) return v.getTime()
+  return v
+}
 
 /** 传给控制台组件的筛选条件（含时间范围） */
 const consoleFilters = computed(() => {
-  const f = { level: filters.level || undefined, keyword: filters.keyword || undefined }
+  const f = { level: filters.level || undefined, keyword: filters.keyword || undefined, srcIp: filters.srcIp || undefined }
   if (range.value && range.value.length === 2) {
-    f.startTime = range.value[0]
-    f.endTime = range.value[1]
+    f.startTime = toMs(range.value[0])
+    f.endTime = toMs(range.value[1])
   }
   return f
 })
@@ -213,19 +266,21 @@ const consoleFilters = computed(() => {
  */
 const streamUrl = computed(() => {
   const parts = []
-  if (appId) parts.push(`appId=${appId}`)
+  if (appId && appId !== 'all') parts.push(`appId=${appId}`)
   const token = getToken()
   if (token) parts.push(`satoken=${encodeURIComponent(token)}`)
   return `/api/logs/stream${parts.length ? '?' + parts.join('&') : ''}`
 })
 
 function commonParams() {
-  const p = { appId }
+  const p = {}
+  if (appId && appId !== 'all') p.appId = appId
   if (filters.level) p.level = filters.level
   if (filters.keyword) p.keyword = filters.keyword
+  if (filters.srcIp && filters.srcIp.trim()) p.srcIp = filters.srcIp.trim()
   if (range.value && range.value.length === 2) {
-    p.startTime = range.value[0]
-    p.endTime = range.value[1]
+    p.startTime = toMs(range.value[0])
+    p.endTime = toMs(range.value[1])
   }
   return p
 }
@@ -242,6 +297,7 @@ async function reloadTable() {
     rows.value = decorate(data?.list)
     total.value = Number(data?.total || 0)
     scannedTables.value = data?.scannedTables || []
+    ftsSkipped.value = !!data?.ftsSkipped
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -270,6 +326,8 @@ function onSizeChange() {
 function reset() {
   filters.level = null
   filters.keyword = ''
+  filters.srcIp = ''
+  ftsSkipped.value = false
   range.value = null
   reloadAll()
 }
@@ -346,6 +404,7 @@ function matches(r) {
   if (appId && Number(r.app_id) !== Number(appId)) return false
   if (filters.level && String(r.level).toUpperCase() !== filters.level) return false
   if (filters.keyword && !String(r.message || '').includes(filters.keyword)) return false
+  if (filters.srcIp && filters.srcIp.trim() && !String(r.src_ip || '').includes(filters.srcIp.trim())) return false
   return true
 }
 
@@ -411,6 +470,14 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+/* 分片续段标记：这条日志是上一条的继续 */
+.cont-chip {
+  margin-right: 6px;
+  border-color: rgba(251, 191, 36, 0.5);
+  background: rgba(251, 191, 36, 0.14);
+  color: #d99a1f;
+  vertical-align: middle;
 }
 .live {
   display: flex;

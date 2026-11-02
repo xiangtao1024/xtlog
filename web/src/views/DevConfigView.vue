@@ -9,19 +9,13 @@
 
     <template v-else>
       <div class="card">
-        <!-- 返回按钮与应用名已由页头提供，这里只留页面内操作 -->
-        <div class="card-b toolbar">
+        <div class="card-h">
+          <b>HTTP 上报</b>
+          <span class="sub muted small">应用主动推送日志到服务端</span>
           <div class="spacer"></div>
           <el-button size="small" @click="goLogs">
             <el-icon style="margin-right: 4px"><VideoPlay /></el-icon>查看日志
           </el-button>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-h">
-          <b>HTTP 上报</b>
-          <span class="sub muted small">应用主动推送日志到服务端</span>
         </div>
         <div class="card-b">
           <el-form label-width="96px">
@@ -218,12 +212,6 @@ onMounted(async () => {
 }
 .cp:hover {
   color: var(--accent);
-}
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 .app-chip {
   display: inline-flex;
