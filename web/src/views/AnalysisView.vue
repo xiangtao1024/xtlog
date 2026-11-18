@@ -91,9 +91,54 @@
           <span class="muted small">logger {{ fmtNum(ov.loggerCount) }} 个</span>
         </div>
         <div class="metric">
+          <label>记录天数</label>
+          <div class="metric-v">{{ fmtNum(scopeCov.dayCount) }}</div>
+          <span class="muted small">覆盖 {{ fmtNum(scopeCov.monthCount) }} 个月（全部存量）</span>
+        </div>
+        <div class="metric">
           <label>时间跨度</label>
           <div class="metric-v sm">{{ spanText }}</div>
           <span class="muted small">扫描 {{ ov.scannedTables || 0 }} 张月表</span>
+        </div>
+      </div>
+
+      <!-- 应用日志覆盖（全部应用模式下逐应用列出） -->
+      <div class="card" v-if="appId === 'all' && cov.items.length">
+        <div class="card-h">
+          <b>应用日志覆盖</b>
+          <span class="sub">每个应用累计记录了多少天、多少个月的日志（不受上方时间筛选影响）</span>
+        </div>
+        <div class="card-b">
+          <el-table :data="cov.items" size="small" style="width: 100%">
+            <el-table-column label="应用" min-width="140">
+              <template #default="{ row }">{{ row.appName }}</template>
+            </el-table-column>
+            <el-table-column label="日志总数" width="110" align="right">
+              <template #default="{ row }">
+                <span class="mono">{{ fmtNum(row.totalCount) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="记录天数" width="100" align="right">
+              <template #default="{ row }">
+                <b class="mono">{{ fmtNum(row.dayCount) }}</b>
+              </template>
+            </el-table-column>
+            <el-table-column label="覆盖月数" width="100" align="right">
+              <template #default="{ row }">
+                <b class="mono">{{ fmtNum(row.monthCount) }}</b>
+              </template>
+            </el-table-column>
+            <el-table-column label="最早日志" width="150">
+              <template #default="{ row }">
+                <span class="small">{{ fmtDateTime(row.firstTime) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近日志" width="150">
+              <template #default="{ row }">
+                <span class="small">{{ fmtDateTime(row.lastTime) }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
         </div>
       </div>
 
@@ -299,6 +344,15 @@ const patterns = ref([])
 const patLoading = ref(false)
 const patSummary = ref(null)
 
+// 应用日志覆盖（天数 / 月数）：不随时间筛选变化，只随所选应用变化
+const cov = ref({ items: [], summary: { dayCount: 0, monthCount: 0 } })
+
+const scopeCov = computed(() => {
+  if (appId.value === 'all') return cov.value.summary || { dayCount: 0, monthCount: 0 }
+  const it = (cov.value.items || []).find((x) => String(x.appId) === String(appId.value))
+  return it || { dayCount: 0, monthCount: 0 }
+})
+
 function startOfDay(ts) {
   const d = new Date(ts)
   d.setHours(0, 0, 0, 0)
@@ -355,6 +409,16 @@ async function reload() {
   }
   loadDim()
   loadPatterns()
+  loadCoverage()
+}
+
+async function loadCoverage() {
+  try {
+    const d = await analysisApi.coverage({ appId: appId.value })
+    cov.value = d || { items: [], summary: { dayCount: 0, monthCount: 0 } }
+  } catch (e) {
+    // 覆盖统计是辅助信息，失败不打断主流程
+  }
 }
 
 async function loadDim() {

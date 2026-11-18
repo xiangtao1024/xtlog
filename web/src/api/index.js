@@ -87,12 +87,13 @@ export const datasourceApi = {
   remove: (id) => http.post('/datasources/remove', { id })
 }
 
-/** 日志分析：概览 / 趋势 / 维度排名 / 错误聚类 */
+/** 日志分析：概览 / 趋势 / 维度排名 / 错误聚类 / 应用日志覆盖（天数·月数） */
 export const analysisApi = {
   overview: (params) => http.get('/analysis/overview', { params }),
   trend: (params) => http.get('/analysis/trend', { params }),
   breakdown: (params) => http.get('/analysis/breakdown', { params }),
-  patterns: (params) => http.get('/analysis/patterns', { params })
+  patterns: (params) => http.get('/analysis/patterns', { params }),
+  coverage: (params) => http.get('/analysis/coverage', { params })
 }
 
 /** 全文索引（FTS5）：开关与回填进度 */

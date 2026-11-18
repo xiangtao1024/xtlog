@@ -537,6 +537,121 @@ public class AnalysisController {
 
     // ==================== 查询构造 ====================
 
+    /**
+     * 应用日志覆盖：每个应用累计记录了多少天、多少个月的日志。
+     *
+     * <p>与 overview / trend 不同，本接口不看页面上的时间筛选范围，统计的是库里的全部存量：
+     * 天数按本地日历日去重（与趋势页同一分桶表达式），月数按「该应用在其中出现过日志的月表张数」计。
+     * appId 传具体应用时只返回该应用，传 all / 不传时返回全部应用并按总条数倒序。</p>
+     */
+    @GetMapping("/api/analysis/coverage")
+    public Object coverage(@RequestParam(value = "appId", required = false) String appId) {
+        try {
+            List<String> tables = DataSourceConfig.listLogTables(holder);
+            if (tables.isEmpty()) {
+                // 全新库：建当前月表，保证下方聚合至少扫一张表（与其他统计接口行为一致）
+                String cur = DataSourceConfig.monthTable(System.currentTimeMillis());
+                DataSourceConfig.ensureLogTable(holder, cur);
+                tables.add(cur);
+            }
+            String dayExpr = bucketExpr("day");
+
+            boolean single = appId != null && appId.trim().length() > 0 && !"all".equalsIgnoreCase(appId.trim());
+            Object[] appParams = new Object[0];
+            String appWhere = "";
+            if (single) {
+                appParams = new Object[] { Long.valueOf(Long.parseLong(appId.trim())) };
+                appWhere = " WHERE app_id = ?";
+            }
+
+            // app -> [总条数, 覆盖月数, 最小时间, 最大时间]
+            Map<Long, long[]> agg = new HashMap<Long, long[]>();
+            // app -> 有日志的本地日历日集合（"yyyy-MM-dd"）
+            Map<Long, Set<String>> days = new HashMap<Long, Set<String>>();
+
+            for (String tb : tables) {
+                // 月覆盖 + 总条数 + 时间边界：走 app_id 前导索引，COUNT/MIN/MAX 不回表读 message
+                List<Dict> rows = holder.executeQuery(
+                        "SELECT COALESCE(app_id, 0) AS aid, COUNT(*) AS c, MIN(log_time) AS mn, MAX(log_time) AS mx"
+                                + " FROM " + tb + appWhere + " GROUP BY COALESCE(app_id, 0)",
+                        appParams);
+                for (Dict r : rows) {
+                    long aid = toLong(r.get("aid"));
+                    long[] slot = agg.get(Long.valueOf(aid));
+                    if (slot == null) {
+                        slot = new long[4];
+                        agg.put(Long.valueOf(aid), slot);
+                    }
+                    slot[0] += toLong(r.get("c"));
+                    slot[1] += 1; // 该应用在这张月表里有日志，覆盖月数 +1
+                    long mn = toLong(r.get("mn"));
+                    long mx = toLong(r.get("mx"));
+                    if (mn > 0 && (slot[2] == 0 || mn < slot[2])) {
+                        slot[2] = mn;
+                    }
+                    if (mx > slot[3]) {
+                        slot[3] = mx;
+                    }
+                }
+                // 天数去重：按 app_id + 本地日历日分组（覆盖索引扫描，不读 message）
+                List<Dict> dayRows = holder.executeQuery(
+                        "SELECT COALESCE(app_id, 0) AS aid, " + dayExpr + " AS d FROM " + tb
+                                + appWhere + " GROUP BY COALESCE(app_id, 0), d",
+                        appParams);
+                for (Dict r : dayRows) {
+                    long aid = toLong(r.get("aid"));
+                    Set<String> set = days.get(Long.valueOf(aid));
+                    if (set == null) {
+                        set = new HashSet<String>();
+                        days.put(Long.valueOf(aid), set);
+                    }
+                    set.add(String.valueOf(r.get("d")));
+                }
+            }
+
+            List<Dict> items = new ArrayList<Dict>();
+            Set<String> allDays = new HashSet<String>();
+            for (Map.Entry<Long, long[]> e : agg.entrySet()) {
+                long aid = e.getKey().longValue();
+                long[] s = e.getValue();
+                Set<String> set = days.get(Long.valueOf(aid));
+                if (set != null) {
+                    allDays.addAll(set);
+                }
+                Dict d = new Dict();
+                d.put("appId", Long.valueOf(aid));
+                AppInfo info = appService.resolveById(aid);
+                d.put("appName", info != null ? info.name : ("应用#" + aid));
+                d.put("totalCount", Long.valueOf(s[0]));
+                d.put("monthCount", Long.valueOf(s[1]));
+                d.put("dayCount", Long.valueOf(set == null ? 0 : set.size()));
+                d.put("firstTime", Long.valueOf(s[2]));
+                d.put("lastTime", Long.valueOf(s[3]));
+                items.add(d);
+            }
+            Collections.sort(items, new Comparator<Dict>() {
+                public int compare(Dict a, Dict b) {
+                    long x = ((Number) a.get("totalCount")).longValue();
+                    long y = ((Number) b.get("totalCount")).longValue();
+                    return x < y ? 1 : (x > y ? -1 : 0);
+                }
+            });
+
+            Dict summary = new Dict();
+            summary.put("dayCount", Long.valueOf(allDays.size()));
+            summary.put("monthCount", Long.valueOf(tables.size()));
+
+            Dict data = new Dict();
+            data.put("items", items);
+            data.put("summary", summary);
+            return ApiResponse.ok(data);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ApiResponse.error(500, rootCause(e));
+        }
+    }
+
+
     /** 时间范围 -> 与库中真实月表求交集 */
     private List<String> resolveTables(long from, long to) {
         List<String> candidates = DataSourceConfig.monthsBetween(from, to);

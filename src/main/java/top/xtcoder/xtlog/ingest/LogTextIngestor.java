@@ -41,6 +41,19 @@ public class LogTextIngestor {
     private static final Pattern TS_SYSLOG = Pattern.compile(
             "^([A-Za-z]{3})\\s+(\\d{1,2})\\s+(\\d{2}):(\\d{2}):(\\d{2})");
 
+    /**
+     * MySQL 慢查询日志的行首前缀「# Time:」（时间戳本体跟在后面，格式与 TS_JAVA 相同，
+     * 可带 6 位微秒与时区偏移，如 2026-11-18T00:00:10.814237+08:00）。
+     * 剥掉前缀后即可复用 TS_JAVA 解析；该行也是慢查询日志「新条目」的起始特征。
+     */
+    private static final Pattern TS_MYSQL_PREFIX = Pattern.compile("^#\\s*Time:\\s*");
+
+    /** MySQL 慢查询日志的 Query_time 值（秒） */
+    private static final Pattern QUERY_TIME = Pattern.compile("#\\s*Query_time:\\s*([0-9.]+)");
+
+    /** Query_time 超过该秒数推断为 WARN，让慢查询能接上级别告警规则 */
+    private static final double SLOW_QUERY_WARN_SEC = 1.0d;
+
     private static final java.util.Map<String, Integer> MONTHS = new java.util.HashMap<String, Integer>();
     static {
         String[] m = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
@@ -155,13 +168,20 @@ public class LogTextIngestor {
 
     /** 解析首行时间戳，支持多种常见日志格式；全部失败返回 null（由调用方回退到接收时刻） */
     private Date parseLogTime(String text) {
-        String first = firstLine(text);
+        // MySQL 慢查询日志首行是「# Time: 2026-...」，先剥前缀再交给各解析器
+        String first = stripSqlSlowPrefix(firstLine(text));
         Date d;
         if ((d = tryJava(first)) != null) return d;
         if ((d = tryNginxError(first)) != null) return d;
         if ((d = tryNginxAccess(first)) != null) return d;
         if ((d = trySyslog(first)) != null) return d;
         return null;
+    }
+
+    /** 剥掉 MySQL 慢查询日志行首的「# Time:」前缀；没有该前缀则原样返回 */
+    private static String stripSqlSlowPrefix(String line) {
+        Matcher m = TS_MYSQL_PREFIX.matcher(line);
+        return m.find() ? line.substring(m.end()) : line;
     }
 
     private static Date toDate(int y, int mo, int d, int h, int mi, int s, int ms) {
@@ -237,7 +257,26 @@ public class LogTextIngestor {
     /** 跳过首行时间戳，返回其后文本起始位置（用于 logger/线程推断） */
     private int tsEnd(String first) {
         Matcher a = TS_JAVA.matcher(first);
-        if (a.find() && a.start() == 0) return a.end();
+        if (a.find() && a.start() == 0) {
+            int end = a.end();
+            // TS_JAVA 的毫秒组只吃 1-3 位，MySQL 慢查询日志是 6 位微秒：
+            // 剩余数字继续吞掉，再补上时区偏移 / Z，避免 logger 推断把 "237+08:00" 当成 logger
+            while (end < first.length() && Character.isDigit(first.charAt(end))) {
+                end++;
+            }
+            if (end < first.length() && (first.charAt(end) == '+' || first.charAt(end) == '-')) {
+                int j = end + 1;
+                while (j < first.length() && (Character.isDigit(first.charAt(j)) || first.charAt(j) == ':')) {
+                    j++;
+                }
+                if (j > end + 1) {
+                    end = j;
+                }
+            } else if (end < first.length() && first.charAt(end) == 'Z') {
+                end++;
+            }
+            return end;
+        }
         Matcher n = TS_NGINX_ERR.matcher(first);
         if (n.find() && n.start() == 0) return n.end();
         Matcher x = TS_NGINX_ACC.matcher(first);
@@ -272,6 +311,18 @@ public class LogTextIngestor {
         if (up.contains("TRACE")) {
             return "TRACE";
         }
+        // MySQL 慢查询日志：首行只有 "# Time:"，没有级别词；
+        // Query_time 超过阈值推断为 WARN，让慢查询也能接上级别告警规则
+        Matcher q = QUERY_TIME.matcher(text);
+        if (q.find()) {
+            try {
+                if (Double.parseDouble(q.group(1)) >= SLOW_QUERY_WARN_SEC) {
+                    return "WARN";
+                }
+            } catch (NumberFormatException ignored) {
+                // 非法数值按 INFO 落库
+            }
+        }
         return "INFO";
     }
 
@@ -288,7 +339,8 @@ public class LogTextIngestor {
      * 否则取第一个有效 token。避免把时间戳误当 logger（如 "2026-09-23"）。
      */
     private String guessLogger(String text) {
-        String first = firstLine(text);
+        // 慢查询日志首行剥掉「# Time:」前缀后只剩时间戳，logger 自然为空，不会被 "# Time:" 污染
+        String first = stripSqlSlowPrefix(firstLine(text));
         int end = tsEnd(first);
         String rest = end > 0 ? first.substring(end).trim() : first;
         String[] parts = rest.split("\\s+");
@@ -345,6 +397,11 @@ public class LogTextIngestor {
     boolean isNewEntry(String line) {
         if (line == null || line.length() == 0) {
             return false;
+        }
+        // MySQL 慢查询日志：「# Time: 2026-...」行首是注释符，先按前缀识别，
+        // 否则整条慢查询（含 SQL）都会被当成上一条的续行缝合成巨型 blob
+        if (TS_MYSQL_PREFIX.matcher(line).find()) {
+            return true;
         }
         if (hasTimestamp(line)) {
             return true;

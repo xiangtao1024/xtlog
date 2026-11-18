@@ -124,20 +124,28 @@ public class StatsController {
     }
 
     /**
-     * 7 天趋势：以「天」为粒度对 log_time 做范围聚合（走 idx_*_time 索引）。
-     * 一次查询：WHERE log_time >= 7天前，再按天分组计数；没有数据的天补 0。
+     * 7 天趋势：以「本地天」为粒度对 log_time 做范围聚合（走 idx_*_time 索引）。
+     * 一次查询：WHERE log_time >= 7天前（本地零点），再按本地天分组计数；没有数据的天补 0。
+     *
+     * <p>关键修复：分组表达式必须用本地时区（strftime(..., 'localtime') / DATE_FORMAT / to_char），
+     * 与下方 Java 端用 {@code Calendar} 生成的中文日期标签保持同一时区。旧实现用
+     * {@code CAST(log_time/86400000 AS INTEGER)} 取的是 UTC 天序号，而标签是本地天序号，
+     * 在 UTC+8 等非 UTC 时区里两者相差约一天——结果就是下午/晚上的日志被算进「下一天」的柱子，
+     * 首页「近 7 日日志量」按日聚合错位。
      */
     private List<Dict> buildTrend(String union, long now) {
         long sevenAgo = startOfDay(now) - 6L * 86400000L;
+        String dayExpr = dayBucketExpr();
         List<Dict> rows = holder.executeQuery(
-                "SELECT CAST(log_time/86400000 AS INTEGER) AS d, COUNT(*) AS c"
+                "SELECT " + dayExpr + " AS d, COUNT(*) AS c"
                         + " FROM (" + union + ") t WHERE log_time >= ? GROUP BY d",
-                Long.valueOf(sevenAgo));
-        java.util.Map<Long, Long> map = new java.util.HashMap<Long, Long>();
+                DataSourceConfig.tsValue(holder, sevenAgo));
+        java.util.Map<String, Long> map = new java.util.HashMap<String, Long>();
         for (Dict r : rows) {
-            map.put(Long.valueOf(toLong(r.get("d"))), Long.valueOf(toLong(r.get("c"))));
+            map.put(String.valueOf(r.get("d")), Long.valueOf(toLong(r.get("c"))));
         }
         SimpleDateFormat sdf = new SimpleDateFormat("MM-dd");
+        SimpleDateFormat ymdFmt = new SimpleDateFormat("yyyy-MM-dd");
         List<Dict> trend = new ArrayList<Dict>();
         Calendar c = Calendar.getInstance();
         c.setTimeInMillis(now);
@@ -148,15 +156,27 @@ public class StatsController {
         c.add(Calendar.DAY_OF_MONTH, -6);
         for (int i = 0; i < 7; i++) {
             long midnight = c.getTimeInMillis();
-            long dayKey = midnight / 86400000L;
+            String ymd = ymdFmt.format(new Date(midnight));
             Dict d = new Dict();
             d.put("date", sdf.format(new Date(midnight)));
-            Long v = map.get(Long.valueOf(dayKey));
+            Long v = map.get(ymd);
             d.put("count", Long.valueOf(v == null ? 0L : v.longValue()));
             trend.add(d);
             c.add(Calendar.DAY_OF_MONTH, 1);
         }
         return trend;
+    }
+
+    /** 本地「天」分桶表达式：各库时间列类型不同，且必须落在本机时区。 */
+    private String dayBucketExpr() {
+        if (DataSourceConfig.isMySql(holder)) {
+            return "DATE_FORMAT(log_time, '%Y-%m-%d')";
+        }
+        if (DataSourceConfig.isPg(holder)) {
+            return "to_char(log_time, 'YYYY-MM-DD')";
+        }
+        // SQLite：log_time 是 epoch 毫秒，先 /1000 转秒，再用 'localtime' 取本地天
+        return "strftime('%Y-%m-%d', log_time/1000, 'unixepoch', 'localtime')";
     }
 
     private List<Dict> buildEmptyTrend(long now) {

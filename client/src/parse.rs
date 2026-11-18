@@ -18,6 +18,9 @@ const LEVEL_WORDS: [&str; 11] = [
 /// 缓冲安全上限：超过就强制输出，避免「永远没有新条目特征」的输出把内存撑爆
 const MAX_BUFFER_BYTES: usize = 256 * 1024;
 
+/// Query_time 超过该秒数推断为 WARN，让慢查询能接上级别告警规则（与服务端一致）
+const SLOW_QUERY_WARN_SEC: f64 = 1.0;
+
 /// 一条待推送的日志
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -32,13 +35,24 @@ pub struct Entry {
 impl Entry {
     /// 把一条完整的文本块（可能含续行）解析成结构化日志
     pub fn from_text(text: &str) -> Entry {
-        let first = first_line(text);
+        // MySQL 慢查询日志首行是「# Time: 2026-...」，先剥前缀再推断，
+        // 否则 logger 会被 "# Time:" 污染、时间戳解析不到
+        let stripped = strip_sql_slow_prefix(first_line(text));
+        let mut level = guess_level(stripped);
+        // 慢查询日志没有级别词：Query_time 超过阈值推断为 WARN
+        if level == "INFO" {
+            if let Some(qt) = query_time_sec(text) {
+                if qt >= SLOW_QUERY_WARN_SEC {
+                    level = "WARN".into();
+                }
+            }
+        }
         Entry {
-            level: guess_level(first),
-            logger: guess_logger(first),
-            thread: guess_thread(first),
+            level,
+            logger: guess_logger(stripped),
+            thread: guess_thread(stripped),
             message: text.to_string(),
-            ts_ms: parse_log_time_ms(first),
+            ts_ms: parse_log_time_ms(stripped),
         }
     }
 }
@@ -95,6 +109,11 @@ pub fn is_new_entry(line: &str) -> bool {
     if line.is_empty() {
         return false;
     }
+    // MySQL 慢查询日志：「# Time: 2026-...」行首是注释符，先按前缀识别，
+    // 否则整条慢查询（含 SQL）都会被当成上一条的续行缝合成巨型 blob
+    if has_sql_slow_prefix(line) {
+        return true;
+    }
     if has_timestamp(line) {
         return true;
     }
@@ -103,6 +122,69 @@ pub fn is_new_entry(line: &str) -> bool {
         _ => line,
     };
     LEVEL_WORDS.contains(&head.to_uppercase().as_str())
+}
+
+/// 剥掉 MySQL 慢查询日志行首的「# Time:」前缀；没有该前缀则原样返回
+fn strip_sql_slow_prefix(line: &str) -> &str {
+    if has_sql_slow_prefix(line) {
+        let mut i = 1usize; // 已确认以 '#' 开头
+        let b = line.as_bytes();
+        while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+            i += 1;
+        }
+        i += 5; // "Time:"
+        while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+            i += 1;
+        }
+        &line[i..]
+    } else {
+        line
+    }
+}
+
+/// 行首是否为 MySQL 慢查询日志的「# Time:」前缀（与服务端 ^#\s*Time:\s* 对齐）
+fn has_sql_slow_prefix(line: &str) -> bool {
+    let b = line.as_bytes();
+    if b.is_empty() || b[0] != b'#' {
+        return false;
+    }
+    let mut i = 1usize;
+    while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+        i += 1;
+    }
+    i + 5 <= b.len() && &b[i..i + 5] == b"Time:"
+}
+
+/// MySQL 慢查询日志的 Query_time 值（秒），找不到返回 None
+fn query_time_sec(text: &str) -> Option<f64> {
+    for line in text.lines() {
+        let b = line.as_bytes();
+        if b.is_empty() || b[0] != b'#' {
+            continue;
+        }
+        let mut i = 1usize;
+        while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+            i += 1;
+        }
+        if i + 11 <= b.len() && &b[i..i + 11] == b"Query_time:" {
+            i += 11;
+            while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+                i += 1;
+            }
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+                i += 1;
+            }
+            if i > start {
+                return std::str::from_utf8(&b[start..i])
+                    .ok()?
+                    .parse::<f64>()
+                    .ok();
+            }
+            return None;
+        }
+    }
+    None
 }
 
 fn first_line(text: &str) -> &str {
@@ -288,7 +370,25 @@ fn digits(b: &[u8], i: usize, n: usize) -> Option<u32> {
 /// 顺序：Java/ISO8601（行首）→ nginx error（行首）→ nginx access（行内）→ syslog（行首）。
 pub fn ts_end(first: &str) -> usize {
     if let Some((_, _, _, _, _, _, _, e)) = parse_ts_fields(first) {
-        return e;
+        // 毫秒组只吃 3 位：MySQL 慢查询日志是 6 位微秒，剩余数字要继续吞掉，
+        // 再补上时区偏移 / Z，否则 logger 会被 "237+08:00" 这样的残片污染
+        let b = first.as_bytes();
+        let mut end = e;
+        while end < b.len() && b[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end < b.len() && (b[end] == b'+' || b[end] == b'-') {
+            let mut j = end + 1;
+            while j < b.len() && (b[j].is_ascii_digit() || b[j] == b':') {
+                j += 1;
+            }
+            if j > end + 1 {
+                end = j;
+            }
+        } else if end < b.len() && b[end] == b'Z' {
+            end += 1;
+        }
+        return end;
     }
     if let Some((_, _, _, _, _, _, _, e)) = nginx_err_ts(first) {
         return e;
@@ -554,5 +654,49 @@ mod tests {
         let line = "2026-10-10T09:15:34.789+08:00 DEBUG com.demo.Zoo - iso";
         assert!(is_new_entry(line));
         assert!(Entry::from_text(line).ts_ms.is_some());
+    }
+
+    #[test]
+    fn mysql_slow_log_split_and_levels() {
+        // 与服务端 e2e 同一份样例：7 条里取 2 条（一条正常、一条 Query_time >= 1s）
+        let logs = "# Time: 2026-11-18T00:00:10.814237+08:00\n\
+                    # User@Host: root[root] @  [10.0.0.3]  Id: 171894\n\
+                    # Query_time: 0.000087  Lock_time: 0.000027 Rows_sent: 1  Rows_examined: 1\n\
+                    SET timestamp=1794931210;\n\
+                    SELECT username,password FROM users  WHERE 1 = 1  LIMIT 0,2147483647;\n\
+                    # Time: 2026-11-18T00:01:40.821083+08:00\n\
+                    # User@Host: root[root] @  [10.0.0.3]  Id: 171894\n\
+                    # Query_time: 1.234567  Lock_time: 0.000029 Rows_sent: 1  Rows_examined: 8421\n\
+                    SET timestamp=1794931300;\n\
+                    SELECT username,password FROM users  WHERE 1 = 1  LIMIT 0,2147483647;";
+        let mut merger = Merger::new();
+        let mut entries = Vec::new();
+        for l in logs.lines() {
+            if let Some(done) = merger.push(l) {
+                entries.push(Entry::from_text(&done));
+            }
+        }
+        if let Some(done) = merger.flush() {
+            entries.push(Entry::from_text(&done));
+        }
+        assert_eq!(entries.len(), 2, "两条慢查询应拆成 2 条，不能缝合成 1 条");
+        // 每条完整合并 5 行（Time/User@Host/Query_time/SET/SQL）
+        assert_eq!(entries[0].message.lines().count(), 5, "每条应合并 5 行");
+        assert_eq!(entries[0].level, "INFO");
+        assert_eq!(entries[1].level, "WARN", "Query_time >= 1s 应推断为 WARN");
+        // 本机 +08 时区：2026-11-18T00:00:10.814+08:00 -> 1794931210814
+        assert_eq!(entries[0].ts_ms, Some(1794931210814));
+        assert!(entries[0].logger.is_empty(), "logger 不应被时间戳残片污染");
+        assert!(entries[0].thread.is_empty());
+    }
+
+    #[test]
+    fn sql_slow_prefix_requires_time_word() {
+        // 普通 SQL 输出行不能误判为慢查询新条目
+        assert!(!is_new_entry("# Query_time: 1.5"));
+        assert!(!is_new_entry("SET timestamp=1794931210;"));
+        assert!(!is_new_entry("SELECT username FROM users;"));
+        assert!(is_new_entry("# Time:2026-11-18T00:00:10"));
+        assert!(is_new_entry("#Time: 2026-11-18T00:00:10"));
     }
 }
