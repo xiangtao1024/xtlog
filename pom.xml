@@ -19,11 +19,11 @@
     </properties>
 
     <dependencies>
-        <!-- 自研零依赖框架 -->
+        <!-- 自研零依赖框架（已发布到 Maven Central，源码构建无需本地 install） -->
         <dependency>
             <groupId>top.xtcoder</groupId>
             <artifactId>xtboot</artifactId>
-            <version>0.0.1</version>
+            <version>0.0.3</version>
         </dependency>
         <dependency>
             <groupId>org.xerial</groupId>

@@ -127,28 +127,82 @@ curl -X POST http://localhost:18080/api/alert/rules \
 
 ---
 
-## 快速开始（直接用部署包）
+## 快速部署（3 分钟，无需 Maven / Node）
 
-从 `dist/` 取 `xtlog-server-0.0.1.zip`（或执行打包脚本自己生成），解压即可用：
+仓库已附带打好的部署包 **`dist/xtlog-server-0.0.1.zip`**（约 19 MB，内含 fat jar + 前端静态资源 + 启动脚本 + 配置）。
+clone 后直接解压即可运行——**不需要装 Maven、Node，也不需要本地安装 xtboot**。
+
+### 第 1 步：拿包
 
 ```bash
-unzip xtlog-server-0.0.1.zip && cd xtlog-server-0.0.1
-
-# Windows
-bin\start.bat          # 前台，Ctrl+C 结束
-bin\start-bg.bat       # 后台，PID 写进 data\xtlog.pid
-bin\stop.bat
-
-# Linux / macOS
-chmod +x bin/*.sh
-bin/start.sh
+git clone <仓库地址> xtlog-server
+cd xtlog-server
+ls -lh dist/xtlog-server-0.0.1.zip    # 包就在 dist/，复制到目标机器即可
 ```
 
-- 访问 **http://localhost:18080**
-- 默认管理员 `admin / admin123`（**首次登录后请在「个人中心」改密码**）
-- Linux 生产环境推荐 systemd 托管：`sudo cp service/xtlog.service /etc/systemd/system/ && sudo systemctl enable --now xtlog`
+没有 git 也行：下载仓库的 ZIP，解压后从 `dist/` 取同一个文件。
+`dist/` 里只有发布 zip 入库，解压目录和临时包都被 `.gitignore` 过滤掉了，不会把 19 MB 的解压副本带进仓库。
 
-> 完整的部署、配置、运维说明见 **[deploy/README.md](deploy/README.md)**。
+### 第 2 步：解压
+
+```bash
+# Linux / macOS
+unzip dist/xtlog-server-0.0.1.zip -d /opt
+cd /opt/xtlog-server-0.0.1
+
+# Windows（PowerShell）
+Expand-Archive dist\xtlog-server-0.0.1.zip -DestinationPath C:\xtlog
+cd C:\xtlog\xtlog-server-0.0.1
+```
+
+解压后目录：`xtlog-server.jar`（可执行）、`bin/`（启停脚本）、`config/`（配置）、`data/`（SQLite 库）、`drivers/`（可选数据库驱动）、`service/`（systemd 文件）。
+
+### 第 3 步：启动
+
+前置条件：机器上有 **JDK 8+**（推荐 17），`java -version` 能跑通。
+
+```bat
+rem Windows：前台（Ctrl+C 结束），或后台
+bin\start.bat          rem 前台，Ctrl+C 结束
+bin\start-bg.bat       rem 后台，PID 写入 data\xtlog.pid
+```
+
+```bash
+# Linux / macOS
+chmod +x bin/*.sh
+bin/start.sh                                  # 前台
+nohup bin/start.sh > logs/xtlog.log 2>&1 &    # 后台
+```
+
+看到 `xtboot application started in ... ms` 和 `Access: http://localhost:18080` 即启动成功。
+
+### 第 4 步：登录
+
+浏览器打开 **http://<机器IP>:18080**，默认管理员 **`admin / admin123`**。
+**首次登录后请立刻在「个人中心」改密码。**（全新库用这个初始密码；如果你用的是仓库里现成的 `data/`，可能已被改过。）
+
+### 第 5 步：接入第一条日志
+
+在「应用管理」新建应用，复制系统生成的 token：
+
+```bash
+curl -X POST http://localhost:18080/api/logs \
+  -H "Content-Type: application/json" \
+  -d '{"token":"<你的应用token>","level":"ERROR","logger":"demo","message":"hello xtlog"}'
+```
+
+打开「日志控制台」即可实时看到这条日志。FILE / CMD / 远程客户端等接入方式见下方 [接入日志](#接入日志)。
+
+### 生产环境（Linux systemd）
+
+```bash
+sudo cp service/xtlog.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now xtlog
+sudo journalctl -u xtlog -f        # 跟随日志
+```
+
+完整的配置、备份、远程采集、来源 IP 说明见 **[deploy/README.md](deploy/README.md)**。
 
 ---
 
@@ -158,7 +212,7 @@ bin/start.sh
 
 - JDK 8+（源码按 1.8 编译，推荐 JDK 17 运行）
 - Maven 3.6+、Node.js 18+
-- **xtboot 0.0.1**（自研零依赖框架，是本项目的后端底座，需先安装到本地 Maven 仓库）
+- **无需本地安装 xtboot**：后端底座 `top.xtcoder:xtboot:0.0.3` 已发布到 **Maven Central**，Maven 会自动拉取。
 
 ### 构建
 
@@ -170,12 +224,12 @@ npm run build          # 开发调试时用 npm run dev（端口 3000，已代�
 
 # 2) 后端 fat jar
 cd ..
-mvn -s _mvn-settings.xml -DskipTests clean package
+mvn -DskipTests clean package
 # 产出 target/xtlog-server.jar（包含后端 + 前端静态资源 + 全部依赖）
 ```
 
-> `_mvn-settings.xml` 是内网/离线环境用的 settings（本地仓库 `D:/app/software_delop/maven/maven-repo` + aliyun 镜像）。
-> 若你的 Nexus/中央仓库可直连，直接 `mvn -DskipTests clean package` 即可。
+> 已实测：用**全新的空 Maven 本地仓库**执行上述命令，xtboot 0.0.3 及全部依赖从公有仓库自动下载，构建成功——新人 clone 后不需要任何前置的本地 install。
+> 仓库里的 `_mvn-settings.xml` 只是作者内网环境（Nexus 不可达）的 workaround，**不是必须的**；中央仓库慢时可自行配置 aliyun 镜像。
 
 ### 运行
 
@@ -221,7 +275,7 @@ xtlog-server/
 ├── deploy/                             # 部署骨架：bin / config / drivers / service / README
 ├── scripts/                            # 部署包组装脚本
 ├── docs/                               # 规划方案、xtboot 改造清单、截图
-├── dist/                               # 打包产出（gitignore）
+├── dist/                               # 发布 zip（已入库，clone 即可解压部署）；解压目录/临时包被忽略
 └── data/                               # 运行期数据（SQLite 库，gitignore）
 ```
 
