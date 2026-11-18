@@ -16,6 +16,7 @@ web/dist/
 # *.zip.tmp / *.zip.old / *.tar.gz / 解压目录 仍被忽略
 dist/*
 !dist/xtlog-server-*.zip
+!dist/xtlog-client-*.zip
 
 # ---- 运行期数据（SQLite 库、WAL 日志）----
 data/

@@ -275,7 +275,7 @@ xtlog-server/
 ├── deploy/                             # 部署骨架：bin / config / drivers / service / README
 ├── scripts/                            # 部署包组装脚本
 ├── docs/                               # 规划方案、xtboot 改造清单、截图
-├── dist/                               # 发布 zip（已入库，clone 即可解压部署）；解压目录/临时包被忽略
+├── dist/                               # 发布 zip（server 单包 + client 双平台包，已入库）；解压目录/临时包被忽略
 └── data/                               # 运行期数据（SQLite 库，gitignore）
 ```
 
@@ -300,6 +300,17 @@ curl -X POST http://localhost:18080/api/logs \
 在应用编辑页选来源类型，填文件路径或命令即可。注意：这两种采集发生在 **xtlog 服务所在机器**。
 
 ### 3. xtlog-client（别的机器上的日志）
+
+发布包在 **`dist/xtlog-client-0.1.0.zip`**（整体压缩，按平台分目录）：
+
+```
+xtlog-client-0.1.0/
+├── windows/     # 附带编译好的 xtlog-client.exe（x64）+ 配置模板 + README
+└── debian/      # 配置模板 + systemd service + build.sh + README（二进制自行构建放入）
+```
+
+Windows 解压后直接 `xtlog-client.exe --config=config.json`；Debian/Ubuntu 解压后在 `debian/` 目录
+`./build.sh` 构建出 `xtlog-client` 放进同目录，再 `cp config.example.json config.json` 配好即可用 systemd 常驻。详见各目录内 README。
 
 ```bash
 ./xtlog-client --config=config.json
