@@ -12,7 +12,10 @@ web/node_modules/
 web/dist/
 
 # ---- 部署包产出（scripts\build-dist.* 生成）----
-dist/
+# 默认全忽略；唯独发布 zip 特意入库，供别人 clone 后解压即用（不依赖源码构建）
+# *.zip.tmp / *.zip.old / *.tar.gz / 解压目录 仍被忽略
+dist/*
+!dist/xtlog-server-*.zip
 
 # ---- 运行期数据（SQLite 库、WAL 日志）----
 data/
