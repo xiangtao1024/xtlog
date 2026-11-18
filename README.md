@@ -274,7 +274,7 @@ xtlog-server/
 ├── client/                             # 子项目：xtlog-client（Rust，远程采集推送器）
 ├── deploy/                             # 部署骨架：bin / config / drivers / service / README
 ├── scripts/                            # 部署包组装脚本
-├── docs/                               # 规划方案、xtboot 改造清单、截图
+├── docs/                               # README 界面截图
 ├── dist/                               # 发布 zip（server 单包 + client 双平台包，已入库）；解压目录/临时包被忽略
 └── data/                               # 运行期数据（SQLite 库，gitignore）
 ```
@@ -386,8 +386,6 @@ FILE/CMD 的「本机 IP」由 `HostAddresses` **打分优选**得出（网段 1
 | --- | --- |
 | [deploy/README.md](deploy/README.md) | 部署、systemd、配置、接入、远程采集、来源 IP、运维 |
 | [client/README.md](client/README.md) | xtlog-client 用法与全部配置字段 |
-| [docs/xtlog-server-规划方案.md](docs/xtlog-server-规划方案.md) | 产品定位、功能矩阵、架构设计 |
-| [docs/xtboot-改造清单.md](docs/xtboot-改造清单.md) | 自研框架 xtboot 的能力改造记录 |
 
 ## 路线图 / 待办
 
