@@ -136,6 +136,7 @@
               row-key="_key"
               :row-class-name="rowClass"
               style="width: 100%"
+              @row-dblclick="openDetail"
             >
               <el-table-column label="日志时间" width="176">
                 <template #default="{ row }">
@@ -173,6 +174,11 @@
                   <span class="msg mono">{{ row.message }}</span>
                 </template>
               </el-table-column>
+              <el-table-column label="操作" width="82" fixed="right" align="center">
+                <template #default="{ row }">
+                  <el-button link type="primary" size="small" @click="openDetail(row)">详情</el-button>
+                </template>
+              </el-table-column>
               <template #empty>
                 <span class="muted small">没有匹配的日志</span>
               </template>
@@ -180,6 +186,9 @@
           </div>
         </el-tab-pane>
       </el-tabs>
+
+      <!-- 完整日志详情：表格记录「详情」按钮 / 双击行，与控制台共用同一组件 -->
+      <LogDetailDialog v-model="detail.visible" :row="detail.row" :app-name="appTitle" />
     </template>
   </div>
 </template>
@@ -190,6 +199,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { logApi, getToken } from '../api'
 import LogConsole from '../components/LogConsole.vue'
+import LogDetailDialog from '../components/LogDetailDialog.vue'
 import { apps, loadMeta } from '../store/meta'
 import { fmtTime, levelClass, LEVEL_OPTIONS } from '../utils/format'
 
@@ -202,6 +212,12 @@ const rawAppId = route.query.appId ? String(route.query.appId) : null
 const appId = rawAppId === 'all' ? 'all' : rawAppId ? Number(rawAppId) : null
 
 const tab = ref('console')
+
+// 日志详情弹窗（表格「详情」按钮 / 双击行共用）
+const detail = ref({ visible: false, row: null })
+function openDetail(row) {
+  detail.value = { visible: true, row }
+}
 
 // 表格视图（分页）
 const rows = ref([])

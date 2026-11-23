@@ -1,11 +1,5 @@
 package top.xtcoder.xtlog.ingest;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -46,6 +40,9 @@ public class AlertEngine {
 
     @Autowired
     private AppService appService;
+
+    @Autowired
+    private AlertNotifier notifier;
 
     /** 每 30 秒扫描一次。窗口由规则自身 window_sec 决定，与扫描周期解耦。 */
     @XtScheduled(fixedRate = 30 * 1000)
@@ -308,13 +305,20 @@ public class AlertEngine {
             }
         });
 
-        // Webhook 调用走异步，避免外部 HTTP 故障拖慢扫描线程
+        // 多渠道通知（Webhook + 邮件）走异步，避免外部 HTTP / SMTP 故障拖慢扫描线程
         if (newId[0] > 0 && channels.length() > 0) {
             final long evId = newId[0];
             final MatchResult mr0 = mr;
             final Dict rule0 = rule;
             final String appName0 = appName;
-            CompletableFuture.runAsync(() -> callWebhook(evId, rule0, mr0, channels, appName0));
+            CompletableFuture.runAsync(() -> {
+                try {
+                    String result = notifier.notifyAll(channels, rule0, mr0, evId, appName0);
+                    System.out.println("[xtlog] alert notify event " + evId + ": " + result);
+                } catch (Exception e) {
+                    System.err.println("[xtlog] alert notify event " + evId + " failed: " + e.getMessage());
+                }
+            });
         }
     }
 
@@ -357,122 +361,6 @@ public class AlertEngine {
                         Long.valueOf(id)));
             }
         }
-    }
-
-    // ==================== Webhook 通知 ====================
-
-    /** 简易提取 channels JSON 中的 webhook URL，避免依赖 xtboot JsonUtils 的具体 API */
-    private static String extractWebhookUrl(String channels) {
-        if (channels == null || channels.length() == 0) {
-            return null;
-        }
-        Matcher m = WEBHOOK_PATTERN.matcher(channels);
-        if (m.find()) {
-            return m.group(1);
-        }
-        return null;
-    }
-
-    private static final Pattern WEBHOOK_PATTERN = Pattern.compile(
-            "\"webhook\"\\s*:\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE);
-
-    /** 调用 Webhook：POST JSON，5s 超时，失败只记日志不抛 */
-    private static void callWebhook(long eventId, Dict rule, MatchResult mr,
-                                    String channels, String appName) {
-        String url = extractWebhookUrl(channels);
-        if (url == null || url.length() == 0) {
-            return;
-        }
-        String payload = buildWebhookPayload(eventId, rule, mr, appName);
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            conn.setConnectTimeout(3000);
-            conn.setReadTimeout(5000);
-            conn.setDoOutput(true);
-            OutputStream os = conn.getOutputStream();
-            try {
-                os.write(payload.getBytes(Charset.forName("UTF-8")));
-            } finally {
-                os.close();
-            }
-            int code = conn.getResponseCode();
-            // 丢弃响应体，避免连接挂住
-            BufferedReader r = new BufferedReader(new InputStreamReader(
-                    code >= 400 ? conn.getErrorStream() : conn.getInputStream(), "UTF-8"));
-            try {
-                while (r.read() != -1) {
-                    // drain
-                }
-            } finally {
-                r.close();
-            }
-            if (code >= 400) {
-                System.err.println("[xtlog] webhook " + url + " returned " + code);
-            }
-        } catch (Exception e) {
-            System.err.println("[xtlog] webhook " + url + " failed: " + e.getMessage());
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
-        }
-    }
-
-    /** 手写 JSON（避免依赖 JsonUtils），转义关键字段 */
-    private static String buildWebhookPayload(long eventId, Dict rule, MatchResult mr, String appName) {
-        StringBuilder sb = new StringBuilder("{");
-        sb.append("\"event_id\":").append(eventId).append(",");
-        sb.append("\"rule_id\":").append(toLong(rule.get("id"))).append(",");
-        sb.append("\"rule_name\":").append(q(String.valueOf(rule.get("name")))).append(",");
-        sb.append("\"app_id\":").append(toLong(rule.get("app_id"))).append(",");
-        sb.append("\"app_name\":").append(q(appName)).append(",");
-        sb.append("\"level\":").append(q(mr.sampleLevel == null ? "" : mr.sampleLevel)).append(",");
-        sb.append("\"hit_count\":").append(mr.hitCount).append(",");
-        sb.append("\"threshold\":").append(toInt(rule.get("threshold"), 1)).append(",");
-        sb.append("\"window_sec\":").append(toInt(rule.get("window_sec"), 300)).append(",");
-        sb.append("\"first_time\":").append(System.currentTimeMillis()).append(",");
-        sb.append("\"summary\":").append(q(buildSummary(mr, toInt(rule.get("threshold"), 1)))).append(",");
-        sb.append("\"sample_message\":").append(q(mr.sampleMessage == null ? "" : truncate(mr.sampleMessage, 1000)));
-        sb.append("}");
-        return sb.toString();
-    }
-
-    private static String q(String s) {
-        if (s == null) {
-            return "\"\"";
-        }
-        StringBuilder sb = new StringBuilder("\"");
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '"':
-                    sb.append("\\\"");
-                    break;
-                case '\\':
-                    sb.append("\\\\");
-                    break;
-                case '\n':
-                    sb.append("\\n");
-                    break;
-                case '\r':
-                    sb.append("\\r");
-                    break;
-                case '\t':
-                    sb.append("\\t");
-                    break;
-                default:
-                    if (c < 0x20) {
-                        sb.append(String.format("\\u%04x", Integer.valueOf(c)));
-                    } else {
-                        sb.append(c);
-                    }
-            }
-        }
-        sb.append("\"");
-        return sb.toString();
     }
 
     // ==================== 工具 ====================

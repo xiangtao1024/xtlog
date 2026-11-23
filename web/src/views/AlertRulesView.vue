@@ -31,6 +31,9 @@
 
         <div class="spacer"></div>
 
+        <el-button @click="openSmtp">
+          <el-icon style="margin-right: 5px"><Message /></el-icon>邮件设置
+        </el-button>
         <el-button type="primary" @click="openCreate">
           <el-icon style="margin-right: 5px"><Plus /></el-icon>新建规则
         </el-button>
@@ -153,10 +156,24 @@
           <el-input-number v-model="form.silenceSec" :min="0" :max="86400" :step="60" />
           <span class="muted small" style="margin-left: 8px">秒（默认 600）触发后在该时长内不重复告警</span>
         </el-form-item>
-        <el-form-item label="Webhook">
-          <el-input v-model="form.webhookUrl" placeholder="https://hooks.example.com/alert（留空则只入库不通知）" />
-          <div class="muted small" style="line-height: 1.6; margin-top: 4px">
-            触发时以 POST JSON 通知该地址，payload 含 event_id / rule_name / hit_count / sample_message 等。
+        <el-form-item label="通知渠道">
+          <div class="channels">
+            <div v-for="(ch, idx) in form.channels" :key="idx" class="channel-row">
+              <el-select v-model="ch.type" style="width: 110px">
+                <el-option label="Webhook" value="webhook" />
+                <el-option label="邮箱" value="email" />
+              </el-select>
+              <el-input
+                v-model="ch.value"
+                :placeholder="ch.type === 'webhook' ? 'https://hooks.example.com/alert' : 'ops@example.com'"
+                style="flex: 1"
+              />
+              <el-button :icon="Delete" circle @click="removeChannel(idx)" title="删除" />
+            </div>
+            <el-button text type="primary" :icon="Plus" @click="addChannel">添加渠道</el-button>
+          </div>
+          <div class="muted small" style="line-height: 1.6; margin-top: 2px">
+            支持添加多个 Webhook 和多个邮箱，触发时逐个投递。Webhook 以 POST JSON 通知；邮箱需在「邮件设置」中配置 SMTP。
           </div>
         </el-form-item>
         <el-form-item label="备注">
@@ -170,11 +187,64 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 邮件（SMTP）设置 -->
+    <el-dialog v-model="smtpDialog" title="邮件通知设置（SMTP）" width="560">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px"
+        title="用于给告警规则的「邮箱」渠道发送邮件。QQ / 163 邮箱需使用授权码而非登录密码。"
+      />
+      <el-form :model="smtpForm" label-width="92px">
+        <el-form-item label="SMTP 主机">
+          <el-input v-model="smtpForm.host" placeholder="smtp.example.com" />
+        </el-form-item>
+        <el-form-item label="端口">
+          <el-input-number v-model="smtpForm.port" :min="1" :max="65535" />
+          <span class="muted small" style="margin-left: 8px">25 / 465(SSL) / 587(STARTTLS)</span>
+        </el-form-item>
+        <el-form-item label="加密方式">
+          <el-radio-group v-model="smtpForm.encryption">
+            <el-radio label="none">无 / 明文</el-radio>
+            <el-radio label="ssl">SSL</el-radio>
+            <el-radio label="starttls">STARTTLS</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="账号">
+          <el-input v-model="smtpForm.user" placeholder="通常是邮箱地址" />
+        </el-form-item>
+        <el-form-item label="密码 / 授权码">
+          <el-input v-model="smtpForm.pass" type="password" show-password
+            :placeholder="smtp.passSet ? '已配置，留空则不修改' : '邮箱密码或授权码'" />
+        </el-form-item>
+        <el-form-item label="发件人地址">
+          <el-input v-model="smtpForm.from" placeholder="留空则同账号" />
+        </el-form-item>
+        <el-form-item label="发件人名称">
+          <el-input v-model="smtpForm.fromName" placeholder="xtlog 告警" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="smtp-footer">
+          <div class="test-mail">
+            <el-input v-model="testMailTo" placeholder="测试收件邮箱" style="width: 190px" />
+            <el-button :loading="testingMail" @click="sendTestMail">发送测试邮件</el-button>
+          </div>
+          <div>
+            <el-button @click="smtpDialog = false">取消</el-button>
+            <el-button type="primary" :loading="savingSmtp" @click="saveSmtp">保存</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
+import { Delete, Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { alertApi } from '../api'
 import { apps, loadMeta } from '../store/meta'
@@ -198,9 +268,53 @@ const form = reactive({
   windowSec: 300,
   threshold: 1,
   silenceSec: 600,
-  webhookUrl: '',
+  channels: [],
   remark: ''
 })
+
+// SMTP 邮件设置
+const smtpDialog = ref(false)
+const savingSmtp = ref(false)
+const testingMail = ref(false)
+const testMailTo = ref('')
+const smtp = reactive({ passSet: false })
+const smtpForm = reactive({
+  host: '', port: 25, encryption: 'none', user: '', pass: '', from: '', fromName: ''
+})
+
+function newChannel(type = 'webhook', value = '') {
+  return { type, value }
+}
+
+function addChannel() {
+  form.channels.push(newChannel())
+}
+
+function removeChannel(idx) {
+  form.channels.splice(idx, 1)
+}
+
+// channels JSON <-> 表单数组，兼容旧的 { webhook: "url" } 格式
+function parseChannels(raw) {
+  if (!raw) return []
+  try {
+    const obj = JSON.parse(raw)
+    const out = []
+    const webhooks = obj.webhooks || (obj.webhook ? [obj.webhook] : [])
+    const emails = obj.emails || (obj.email ? [obj.email] : [])
+    webhooks.forEach(v => out.push(newChannel('webhook', v)))
+    emails.forEach(v => out.push(newChannel('email', v)))
+    return out
+  } catch {
+    return []
+  }
+}
+
+function serializeChannels() {
+  const webhooks = form.channels.filter(c => c.type === 'webhook' && c.value.trim()).map(c => c.value.trim())
+  const emails = form.channels.filter(c => c.type === 'email' && c.value.trim()).map(c => c.value.trim())
+  return webhooks.length || emails.length ? JSON.stringify({ webhooks, emails }) : ''
+}
 
 const exprHint = computed(() => {
   switch (form.ruleType) {
@@ -272,7 +386,7 @@ function openCreate() {
     windowSec: 300,
     threshold: 1,
     silenceSec: 600,
-    webhookUrl: '',
+    channels: [],
     remark: ''
   })
   dialog.value = true
@@ -288,7 +402,7 @@ function openEdit(row) {
     windowSec: Number(row.window_sec || 300),
     threshold: Number(row.threshold || 1),
     silenceSec: Number(row.silence_sec || 600),
-    webhookUrl: extractWebhook(row.channels || ''),
+    channels: parseChannels(row.channels),
     remark: row.remark || ''
   })
   dialog.value = true
@@ -313,7 +427,7 @@ async function submit() {
       windowSec: form.windowSec,
       threshold: form.threshold,
       silenceSec: form.silenceSec,
-      channels: form.webhookUrl ? JSON.stringify({ webhook: form.webhookUrl }) : '',
+      channels: serializeChannels(),
       remark: form.remark
     }
     if (editing.value) {
@@ -385,10 +499,70 @@ async function doDelete(row) {
   }
 }
 
-function extractWebhook(channels) {
-  if (!channels) return ''
-  const m = channels.match(/"webhook"\s*:\s*"([^"]+)"/i)
-  return m ? m[1] : ''
+async function openSmtp() {
+  smtpDialog.value = true
+  try {
+    const data = await alertApi.getSmtp()
+    if (!data) return
+    smtp.passSet = !!data.passSet
+    smtpForm.host = data.host || ''
+    smtpForm.port = Number(data.port || 25)
+    smtpForm.encryption = data.ssl ? 'ssl' : (data.starttls ? 'starttls' : 'none')
+    smtpForm.user = data.user || ''
+    smtpForm.pass = ''
+    smtpForm.from = data.from || ''
+    smtpForm.fromName = data.fromName || ''
+  } catch (e) {
+    ElMessage.error(e.message || '加载邮件设置失败')
+  }
+}
+
+async function saveSmtp() {
+  savingSmtp.value = true
+  try {
+    const data = await alertApi.saveSmtp({
+      host: smtpForm.host.trim(),
+      port: smtpForm.port,
+      ssl: smtpForm.encryption === 'ssl',
+      starttls: smtpForm.encryption === 'starttls',
+      user: smtpForm.user.trim(),
+      pass: smtpForm.pass,
+      from: smtpForm.from.trim(),
+      fromName: smtpForm.fromName.trim()
+    })
+    if (data?.error) {
+      ElMessage.error(data.error)
+      return
+    }
+    smtp.passSet = !!data?.passSet
+    smtpForm.pass = ''
+    ElMessage.success('邮件设置已保存')
+    smtpDialog.value = false
+  } catch (e) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    savingSmtp.value = false
+  }
+}
+
+async function sendTestMail() {
+  if (!testMailTo.value.trim()) {
+    ElMessage.warning('请填写测试收件邮箱')
+    return
+  }
+  testingMail.value = true
+  try {
+    const data = await alertApi.testSmtp(testMailTo.value.trim())
+    if (data?.ok) {
+      ElMessage.success('测试邮件已发送，请查收')
+    } else {
+      ElMessage.error(data?.error || '发送失败')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '发送失败')
+  } finally {
+    testingMail.value = false
+  }
 }
 
 function escapeHtml(s) {
@@ -438,5 +612,25 @@ onMounted(async () => {
   justify-content: flex-end;
   padding: 12px 18px;
   border-top: 1px solid var(--line-2);
+}
+.channels {
+  width: 100%;
+}
+.channel-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.smtp-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+.test-mail {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 </style>

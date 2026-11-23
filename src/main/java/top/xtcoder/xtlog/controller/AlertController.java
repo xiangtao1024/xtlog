@@ -49,6 +49,48 @@ public class AlertController {
     @Autowired
     private AppService appService;
 
+    @Autowired
+    private top.xtcoder.xtlog.ingest.AlertNotifier notifier;
+
+    // ==================== SMTP 邮件配置 ====================
+
+    /** 读取 SMTP 配置（密码不回显明文，只回传 passSet 标记） */
+    @GetMapping("/api/alert/smtp")
+    public Object getSmtp() {
+        return ApiResponse.ok(notifier.smtpConfigForFrontend());
+    }
+
+    /** 保存 SMTP 配置；pass 留空表示沿用已保存的密码 */
+    @PostMapping("/api/alert/smtp")
+    public Object saveSmtp(@RequestBody Dict body) {
+        try {
+            notifier.saveSmtpConfig(body == null ? new Dict() : body);
+            return ApiResponse.ok(notifier.smtpConfigForFrontend());
+        } catch (Exception e) {
+            Dict d = new Dict();
+            d.put("error", "save smtp failed: " + e.getMessage());
+            return ApiResponse.ok(d);
+        }
+    }
+
+    /** 发送测试邮件；body: { to: "收件人邮箱" } */
+    @PostMapping("/api/alert/smtp/test")
+    public Object testSmtp(@RequestBody Dict body) {
+        String to = body == null ? "" : strOr(body.get("to"), "");
+        if (to.length() == 0) {
+            Dict d = new Dict();
+            d.put("error", "收件人邮箱不能为空");
+            return ApiResponse.ok(d);
+        }
+        String err = notifier.sendTestMail(to);
+        Dict d = new Dict();
+        d.put("ok", err == null ? Boolean.TRUE : Boolean.FALSE);
+        if (err != null) {
+            d.put("error", err);
+        }
+        return ApiResponse.ok(d);
+    }
+
     // ==================== 规则 CRUD ====================
 
     @GetMapping("/api/alert/rules")

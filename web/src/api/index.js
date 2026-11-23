@@ -139,6 +139,10 @@ export const alertApi = {
   removeRule: (id) => http.delete(`/alert/rules/${id}`),
   toggleRule: (id, enabled) => http.post(`/alert/rules/${id}/toggle`, { enabled: enabled ? 1 : 0 }),
   testRule: (id) => http.get(`/alert/rules/${id}/test`),
+  // SMTP 邮件配置
+  getSmtp: () => http.get('/alert/smtp'),
+  saveSmtp: (payload) => http.post('/alert/smtp', payload),
+  testSmtp: (to) => http.post('/alert/smtp/test', { to }),
   // 事件
   listEvents: (params) => http.get('/alert/events', { params }),
   ackEvent: (id, user) => http.post(`/alert/events/${id}/ack`, { user }),
