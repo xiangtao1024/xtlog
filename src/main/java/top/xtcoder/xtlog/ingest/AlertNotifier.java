@@ -11,9 +11,14 @@ import java.net.URL;
 import java.nio.charset.Charset;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
+import java.util.TimeZone;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -50,6 +55,12 @@ public class AlertNotifier {
 
     @Autowired
     private DbClientHolder holder;
+
+    /**
+     * EHLO/HELO 问候名。RFC 5321 允许用方括号包住的 IP 字面量作主机名。
+     * 不能用「xtlog-alert」这种单点标签名——网易 139/163 反垃圾会对不合规的 HELO 大幅加分。
+     */
+    private static final String HELO_NAME = "[127.0.0.1]";
 
     // ==================== SMTP 配置 key ====================
 
@@ -214,7 +225,9 @@ public class AlertNotifier {
             return "no channels";
         }
         String payload = buildWebhookPayload(eventId, rule, mr, appName);
-        String subject = "【xtlog 告警】" + String.valueOf(rule.get("name"))
+        // 主题去掉【】等全角符号；中文内容本身没问题，但整段特殊符号 + Base64 编码
+        // 在网易反垃圾里是典型营销信特征。实测干净主题能显著降低 score。
+        String subject = "xtlog alert - " + String.valueOf(rule.get("name"))
                 + " - " + appName + " - " + (mr.sampleLevel == null ? "" : mr.sampleLevel);
         String html = buildMailHtml(eventId, rule, mr, appName);
 
@@ -248,11 +261,13 @@ public class AlertNotifier {
         if (!smtp.configured()) {
             return "SMTP 未配置";
         }
-        String subject = "【xtlog】邮件通知测试";
+        // 主题避免用【】/全角符号 + 整段 Base64 编码：网易 139/163 反垃圾对这类"营销信特征"评分很高，
+        // 实测同样正文、把主题从「【xtlog】邮件通知测试」换成干净英文后由 550(score 18~32) 变为 250。
+        String subject = "xtlog alert test";
         String html = "<div style='font-family:sans-serif'>"
-                + "<h3>xtlog 告警邮件测试</h3>"
-                + "<p>如果你收到这封邮件，说明 SMTP 配置正确，告警邮件可以正常送达。</p>"
-                + "<p style='color:#888;font-size:12px'>发送时间：" + new java.util.Date() + "</p>"
+                + "<h3>xtlog mail test</h3>"
+                + "<p>This is an alert notification test from xtlog-server.</p>"
+                + "<p style='color:#888;font-size:12px'>Time: " + new java.util.Date() + "</p>"
                 + "</div>";
         return sendMailDetailed(smtp, to, subject, html);
     }
@@ -324,7 +339,7 @@ public class AlertNotifier {
                 return "greeting: " + line;
             }
 
-            line = sendCmd(in, out, "EHLO xtlog-alert");
+            line = sendCmd(in, out, "EHLO " + HELO_NAME);
             if (c.starttls && !c.ssl) {
                 if (!startsWith(line, 250)) {
                     return "EHLO before STARTTLS: " + line;
@@ -337,7 +352,7 @@ public class AlertNotifier {
                 socket = sslSock;
                 in = new BufferedReader(new InputStreamReader(sslSock.getInputStream(), "UTF-8"));
                 out = new BufferedWriter(new OutputStreamWriter(sslSock.getOutputStream(), "UTF-8"));
-                line = sendCmd(in, out, "EHLO xtlog-alert");
+                line = sendCmd(in, out, "EHLO " + HELO_NAME);
             }
             if (!startsWith(line, 250)) {
                 return "EHLO: " + line;
@@ -427,6 +442,15 @@ public class AlertNotifier {
         w.write("From: " + mimeHeader(c.fromName) + " <" + c.from + ">\r\n");
         w.write("To: " + to + "\r\n");
         w.write("Subject: " + mimeHeader(subject) + "\r\n");
+        // Date / Message-ID / X-Mailer 是 RFC 5322 的标准头。缺失会被网易等反垃圾系统
+        // 判为「发送环境缺乏规范性」而加分；实测补齐后 139 对外发信由 550 变为 250。
+        SimpleDateFormat rfc2822 = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.US);
+        rfc2822.setTimeZone(TimeZone.getDefault());
+        w.write("Date: " + rfc2822.format(new Date()) + "\r\n");
+        String domain = c.from != null && c.from.indexOf('@') >= 0
+                ? c.from.substring(c.from.indexOf('@') + 1) : "localhost";
+        w.write("Message-ID: <" + UUID.randomUUID().toString() + "@" + domain + ">\r\n");
+        w.write("X-Mailer: xtlog-server\r\n");
         w.write("MIME-Version: 1.0\r\n");
         w.write("Content-Type: text/html; charset=UTF-8\r\n");
         w.write("Content-Transfer-Encoding: base64\r\n");
